@@ -7,6 +7,27 @@
 - It never calls OpenAI APIs; all operations happen locally on your machine.
 - It reads and updates local Codex files under `~/.codex` (including `sessions/` and auth files).
 
+## Install
+
+- Linux/macOS/WSL2:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/loongphy/codex-auth/main/scripts/install.sh | bash
+```
+
+  The installer writes the install dir to your shell profile by default.
+  Supported profiles: `~/.bashrc`/`~/.bash_profile`/`~/.profile`, `~/.zshrc`/`~/.zprofile`, `~/.config/fish/config.fish`.
+  Use `--no-add-to-path` to skip profile updates.
+
+- Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/loongphy/codex-auth/main/scripts/install.ps1 | iex
+```
+
+  The installer adds the install dir to current/user `PATH` by default.
+  Use `-NoAddToPath` to skip user `PATH` persistence.
+
 ## Full Commands
 
 ```shell
@@ -64,24 +85,3 @@ Remove accounts (interactive multi-select):
 ```shell
 codex-auth remove
 ```
-
-## Install
-
-- Linux/macOS/WSL2 (one-line, latest release):
-
-```shell
-curl -fsSL https://raw.githubusercontent.com/loongphy/codex-auth/main/scripts/install.sh | bash
-```
-
-  The installer writes the install dir to your shell profile by default.
-  Supported profiles: `~/.bashrc`/`~/.bash_profile`/`~/.profile`, `~/.zshrc`/`~/.zprofile`, `~/.config/fish/config.fish`.
-  Use `--no-add-to-path` to skip profile updates.
-
-- Windows (PowerShell, one-line, latest release):
-
-```powershell
-irm https://raw.githubusercontent.com/loongphy/codex-auth/main/scripts/install.ps1 | iex
-```
-
-  The installer adds the install dir to current/user `PATH` by default.
-  Use `-NoAddToPath` to skip user `PATH` persistence.

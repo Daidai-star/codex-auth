@@ -90,17 +90,21 @@ try {
   $DestBin = Join-Path $InstallDir "codex-auth.exe"
   Copy-Item -Path $SourceBin -Destination $DestBin -Force
 
-  Write-Success "Installed: $DestBin"
+  Write-Success "codex-auth installed successfully!"
+  Write-Info "Path : $DestBin"
 } finally {
   Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
 }
 
 $normalizedInstallDir = Normalize-PathEntry $InstallDir
 $currentSegments = Get-PathSegments $env:Path
+$currentReady = $false
 
 if ($currentSegments -notcontains $normalizedInstallDir) {
   $env:Path = if ([string]::IsNullOrWhiteSpace($env:Path)) { $InstallDir } else { "$InstallDir;$env:Path" }
-  Write-Success "Added to current PATH: $InstallDir"
+  $currentReady = $true
+} else {
+  $currentReady = $true
 }
 
 $persistPath = -not $NoAddToPath
@@ -110,13 +114,11 @@ if ($persistPath) {
   if ($userSegments -notcontains $normalizedInstallDir) {
     $newPath = if ([string]::IsNullOrWhiteSpace($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
     [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-    Write-Success "Added to user PATH: $InstallDir"
   }
+  Write-Success "Ready for PowerShell (loaded via user PATH)."
 } else {
-  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  $userSegments = Get-PathSegments $userPath
-  if ($userSegments -notcontains $normalizedInstallDir) {
-    Write-Warn "Note: $InstallDir was added only to current PATH."
-    Write-Info "Run without -NoAddToPath to persist for future terminals."
+  if ($currentReady) {
+    Write-Success "Ready in this terminal."
   }
+  Write-Info "Run without -NoAddToPath to load it automatically in future PowerShell sessions."
 }

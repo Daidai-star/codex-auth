@@ -23,6 +23,7 @@ VERSION="latest"
 REPO="loongphy/codex-auth"
 ADD_TO_PATH=1
 SHELL_NAME="$(basename "${SHELL:-}")"
+PROFILE_FILE=""
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'
@@ -141,14 +142,21 @@ detect_profile_file() {
   printf "%s" "${HOME}/.bashrc"
 }
 
+shell_display_name() {
+  case "${SHELL_NAME}" in
+    fish|zsh|bash) printf "%s" "${SHELL_NAME}" ;;
+    *) printf "shell" ;;
+  esac
+}
+
 persist_path_to_profile() {
   local profile path_line
   profile="$(detect_profile_file)"
+  PROFILE_FILE="${profile}"
   mkdir -p "$(dirname "${profile}")"
   touch "${profile}"
 
   if grep -Fq "${INSTALL_DIR}" "${profile}"; then
-    print_info "Install dir already present in ${profile}"
     return
   fi
 
@@ -168,7 +176,6 @@ persist_path_to_profile() {
       echo "${path_line}"
     } >> "${profile}"
   fi
-  print_success "Added install dir to ${profile}"
 }
 
 print_shell_restart_hint() {
@@ -276,28 +283,43 @@ else
   chmod 0755 "${DEST_BIN}"
 fi
 
-print_success "Installed: ${DEST_BIN}"
+print_success "codex-auth installed successfully!"
+print_info "Path : ${DEST_BIN}"
 CURRENT_PATH_MISSING=0
 if path_contains_dir "${INSTALL_DIR}"; then
-  print_success "Install dir is already in current PATH."
+  :
 else
   CURRENT_PATH_MISSING=1
-  print_warn "Note: ${INSTALL_DIR} is not in current PATH for this shell."
-  print_warn "Use it immediately in this terminal:"
+fi
+
+if [[ "${ADD_TO_PATH}" -eq 1 ]]; then
+  persist_path_to_profile
+fi
+
+if [[ "${ADD_TO_PATH}" -eq 1 && -n "${PROFILE_FILE}" ]]; then
+  if [[ "${CURRENT_PATH_MISSING}" -eq 0 ]]; then
+    print_success "Ready for $(shell_display_name) (loaded via ${PROFILE_FILE})."
+  else
+    print_success "Ready for future $(shell_display_name) sessions (loaded via ${PROFILE_FILE})."
+  fi
+elif [[ "${CURRENT_PATH_MISSING}" -eq 0 ]]; then
+  print_success "Ready in this terminal."
+else
+  print_warn "Not ready in this terminal yet."
+fi
+
+if [[ "${CURRENT_PATH_MISSING}" -eq 1 ]]; then
+  print_warn "Use codex-auth immediately in this terminal with:"
   if [[ "${SHELL_NAME}" == "fish" ]]; then
     print_cmd "  set -gx PATH \"${INSTALL_DIR}\" \$PATH"
   else
     print_cmd "  export PATH=\"${INSTALL_DIR}:\$PATH\""
   fi
-fi
-
-if [[ "${ADD_TO_PATH}" -eq 1 ]]; then
-  persist_path_to_profile
-  if [[ "${CURRENT_PATH_MISSING}" -eq 1 ]]; then
+  if [[ "${ADD_TO_PATH}" -eq 1 && -n "${PROFILE_FILE}" ]]; then
     print_warn "Or reload your shell profile now:"
-    print_cmd "  source \"$(detect_profile_file)\""
+    print_cmd "  source \"${PROFILE_FILE}\""
     print_shell_restart_hint
+  else
+    print_info "Run again without --no-add-to-path to auto-load it in future $(shell_display_name) sessions."
   fi
-else
-  print_warn "Skipped shell profile update (--no-add-to-path)."
 fi
