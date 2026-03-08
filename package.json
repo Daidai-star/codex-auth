@@ -1,6 +1,6 @@
 {
   "name": "@loongphy/codex-auth",
-  "version": "0.1.4-rc.1",
+  "version": "0.1.4-rc.2",
   "description": "Local-only CLI for switching Codex accounts",
   "license": "MIT",
   "repository": {
@@ -20,9 +20,9 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@loongphy/codex-auth-linux-x64": "0.1.4-rc.1",
-    "@loongphy/codex-auth-darwin-arm64": "0.1.4-rc.1",
-    "@loongphy/codex-auth-win32-x64": "0.1.4-rc.1"
+    "@loongphy/codex-auth-linux-x64": "0.1.4-rc.2",
+    "@loongphy/codex-auth-darwin-arm64": "0.1.4-rc.2",
+    "@loongphy/codex-auth-win32-x64": "0.1.4-rc.2"
   },
   "scripts": {
     "check:versions": "node scripts/npm/check-versions.mjs",
