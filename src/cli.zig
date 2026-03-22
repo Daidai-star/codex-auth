@@ -289,25 +289,6 @@ pub fn printHelp(auto_cfg: *const registry.AutoSwitchConfig, api_cfg: *const reg
     const use_color = colorEnabled();
     try writeHelp(out, use_color, auto_cfg, api_cfg);
     try out.flush();
-    try printUsageApiRiskWarning(api_cfg.usage);
-}
-
-pub fn printUsageApiRiskWarning(api_usage_enabled: bool) !void {
-    var buffer: [512]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buffer);
-    const out = &writer.interface;
-    try writeUsageApiRiskWarning(out, stderrColorEnabled(), api_usage_enabled);
-    try out.flush();
-}
-
-pub fn writeUsageApiRiskWarning(out: *std.Io.Writer, use_color: bool, api_usage_enabled: bool) !void {
-    if (!api_usage_enabled) return;
-
-    if (use_color) try out.writeAll(ansi.bold_yellow);
-    try out.writeAll("Warning:");
-    if (use_color) try out.writeAll(ansi.reset);
-    try out.writeAll(" Usage refresh can use the ChatGPT usage API and may trigger OpenAI account restrictions or suspension.\n");
-    try out.writeAll("         Switch to local-only usage reading with `codex-auth config api disable` for safer but less accurate usage data.\n\n");
 }
 
 pub fn writeHelp(
@@ -402,6 +383,7 @@ pub fn writeHelp(
     if (use_color) try out.writeAll(ansi.reset);
     try out.writeAll("\n\n");
     try out.writeAll("  `add` is accepted as a deprecated alias for `login` and will be removed in the next release.\n");
+    try out.writeAll("  `config api enable` may trigger OpenAI account restrictions or suspension in some environments.\n");
 }
 
 fn parsePercentArg(raw: []const u8) ?u8 {

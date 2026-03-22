@@ -153,13 +153,6 @@ fn expectFailure(result: std.process.Child.RunResult) !void {
     }
 }
 
-fn expectUsageApiWarningOnStderrOnly(result: std.process.Child.RunResult) !void {
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "Warning: Usage refresh can use the ChatGPT usage API") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "`codex-auth config api disable`") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Warning: Usage refresh can use the ChatGPT usage API") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "`codex-auth config api disable`") == null);
-}
-
 fn authJsonPathAlloc(allocator: std.mem.Allocator, home_root: []const u8) ![]u8 {
     return std.fs.path.join(allocator, &[_][]const u8{ home_root, ".codex", "auth.json" });
 }
@@ -703,7 +696,7 @@ test "Scenario: Given cpa file import when running import cpa then it stores a s
     try std.testing.expect(std.mem.eql(u8, loaded.accounts.items[0].alias, "personal"));
 }
 
-test "Scenario: Given default api usage when rendering help then warning stays on stderr" {
+test "Scenario: Given default api usage when rendering help then the api enable risk note stays in stdout" {
     const gpa = std.testing.allocator;
     const project_root = try projectRootAlloc(gpa);
     defer gpa.free(project_root);
@@ -722,7 +715,8 @@ test "Scenario: Given default api usage when rendering help then warning stays o
     try expectSuccess(result);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "codex-auth") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Usage API: ON (api)") != null);
-    try expectUsageApiWarningOnStderrOnly(result);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "`config api enable` may trigger OpenAI account restrictions or suspension in some environments.") != null);
+    try std.testing.expectEqualStrings("", result.stderr);
 }
 
 test "Scenario: Given remove query with one match when running remove then it deletes immediately and prints a summary" {
@@ -1548,7 +1542,7 @@ test "Scenario: Given parseable auth without email for the active account when r
     try std.testing.expect(std.mem.eql(u8, loaded.active_account_key.?, backup_key));
 }
 
-test "Scenario: Given default api usage when rendering status then warning stays on stderr" {
+test "Scenario: Given default api usage when rendering status then no warning is printed" {
     const gpa = std.testing.allocator;
     const project_root = try projectRootAlloc(gpa);
     defer gpa.free(project_root);
@@ -1567,10 +1561,10 @@ test "Scenario: Given default api usage when rendering status then warning stays
     try expectSuccess(result);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "auto-switch: OFF") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "usage: api") != null);
-    try expectUsageApiWarningOnStderrOnly(result);
+    try std.testing.expectEqualStrings("", result.stderr);
 }
 
-test "Scenario: Given default api usage when listing accounts then warning stays on stderr" {
+test "Scenario: Given default api usage when listing accounts then no warning is printed" {
     const gpa = std.testing.allocator;
     const project_root = try projectRootAlloc(gpa);
     defer gpa.free(project_root);
@@ -1588,5 +1582,5 @@ test "Scenario: Given default api usage when listing accounts then warning stays
 
     try expectSuccess(result);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ACCOUNT") != null);
-    try expectUsageApiWarningOnStderrOnly(result);
+    try std.testing.expectEqualStrings("", result.stderr);
 }

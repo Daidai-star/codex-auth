@@ -502,7 +502,6 @@ pub fn printStatus(allocator: std.mem.Allocator, codex_home: []const u8) !void {
     var stdout: io_util.Stdout = undefined;
     stdout.init();
     try writeStatusWithColor(stdout.out(), status, colorEnabled());
-    try cli.printUsageApiRiskWarning(status.api_usage_enabled);
 }
 
 pub fn getStatus(allocator: std.mem.Allocator, codex_home: []const u8) !Status {
@@ -732,15 +731,6 @@ pub fn handleApiUsageCommand(allocator: std.mem.Allocator, codex_home: []const u
     const enabled = action == .enable;
     reg.api.usage = enabled;
     try registry.saveRegistry(allocator, codex_home, &reg);
-
-    if (enabled) {
-        var stderr_buffer: [512]u8 = undefined;
-        var writer = std.fs.File.stderr().writer(&stderr_buffer);
-        const out = &writer.interface;
-        try out.writeAll("Warning: Enabling API-based usage refresh may violate OpenAI's usage guidelines\n");
-        try out.writeAll("         and lead to account suspension. Use at your own risk.\n");
-        try out.flush();
-    }
 }
 
 pub fn shouldEnsureManagedService(enabled: bool, runtime: RuntimeState, definition_matches: bool) bool {
