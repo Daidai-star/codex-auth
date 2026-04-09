@@ -1622,7 +1622,10 @@ fn renderSwitchList(
         try out.writeAll(if (is_selected) "> " else "  ");
         try writeIndexPadded(out, selectable_counter + 1, idx_width);
         try out.writeAll(" ");
-        try writeTruncatedPadded(out, row.account, widths.email);
+        const indent: usize = @as(usize, row.depth) * 2;
+        const indent_to_print: usize = @min(indent, widths.email);
+        try writeRepeat(out, ' ', indent_to_print);
+        try writeTruncatedPadded(out, row.account, widths.email - indent_to_print);
         try out.writeAll("  ");
         try writeTruncatedPadded(out, row.plan, widths.plan);
         try out.writeAll("  ");
@@ -1700,7 +1703,10 @@ fn renderRemoveList(
         try out.writeAll(" ");
         try writeIndexPadded(out, selectable_counter + 1, idx_width);
         try out.writeAll(" ");
-        try writeTruncatedPadded(out, row.account, widths.email);
+        const indent: usize = @as(usize, row.depth) * 2;
+        const indent_to_print: usize = @min(indent, widths.email);
+        try writeRepeat(out, ' ', indent_to_print);
+        try writeTruncatedPadded(out, row.account, widths.email - indent_to_print);
         try out.writeAll("  ");
         try writeTruncatedPadded(out, row.plan, widths.plan);
         try out.writeAll("  ");
@@ -1754,6 +1760,13 @@ fn writeTruncatedPadded(out: *std.Io.Writer, value: []const u8, width: usize) !v
     try out.writeAll(".");
 }
 
+fn writeRepeat(out: *std.Io.Writer, ch: u8, count: usize) !void {
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        try out.writeByte(ch);
+    }
+}
+
 const SwitchWidths = struct {
     email: usize,
     plan: usize,
@@ -1769,6 +1782,7 @@ const SwitchRow = struct {
     rate_5h: []u8,
     rate_week: []u8,
     last: []u8,
+    depth: u8,
     is_active: bool,
     is_header: bool,
 
@@ -1820,10 +1834,11 @@ fn buildSwitchRows(allocator: std.mem.Allocator, reg: *registry.Registry) !Switc
                 .rate_5h = rate_5h_str,
                 .rate_week = rate_week_str,
                 .last = last,
+                .depth = display_row.depth,
                 .is_active = display_row.is_active,
                 .is_header = false,
             };
-            widths.email = @max(widths.email, display_row.account_cell.len);
+            widths.email = @max(widths.email, display_row.account_cell.len + (@as(usize, display_row.depth) * 2));
             widths.plan = @max(widths.plan, plan.len);
             widths.rate_5h = @max(widths.rate_5h, rate_5h_str.len);
             widths.rate_week = @max(widths.rate_week, rate_week_str.len);
@@ -1836,10 +1851,11 @@ fn buildSwitchRows(allocator: std.mem.Allocator, reg: *registry.Registry) !Switc
                 .rate_5h = try allocator.dupe(u8, ""),
                 .rate_week = try allocator.dupe(u8, ""),
                 .last = try allocator.dupe(u8, ""),
+                .depth = display_row.depth,
                 .is_active = false,
                 .is_header = true,
             };
-            widths.email = @max(widths.email, display_row.account_cell.len);
+            widths.email = @max(widths.email, display_row.account_cell.len + (@as(usize, display_row.depth) * 2));
         }
     }
     if (widths.email > 32) widths.email = 32;
@@ -1882,10 +1898,11 @@ fn buildSwitchRowsFromIndices(
                 .rate_5h = rate_5h_str,
                 .rate_week = rate_week_str,
                 .last = last,
+                .depth = display_row.depth,
                 .is_active = display_row.is_active,
                 .is_header = false,
             };
-            widths.email = @max(widths.email, display_row.account_cell.len);
+            widths.email = @max(widths.email, display_row.account_cell.len + (@as(usize, display_row.depth) * 2));
             widths.plan = @max(widths.plan, plan.len);
             widths.rate_5h = @max(widths.rate_5h, rate_5h_str.len);
             widths.rate_week = @max(widths.rate_week, rate_week_str.len);
@@ -1898,10 +1915,11 @@ fn buildSwitchRowsFromIndices(
                 .rate_5h = try allocator.dupe(u8, ""),
                 .rate_week = try allocator.dupe(u8, ""),
                 .last = try allocator.dupe(u8, ""),
+                .depth = display_row.depth,
                 .is_active = false,
                 .is_header = true,
             };
-            widths.email = @max(widths.email, display_row.account_cell.len);
+            widths.email = @max(widths.email, display_row.account_cell.len + (@as(usize, display_row.depth) * 2));
         }
     }
     if (widths.email > 32) widths.email = 32;
@@ -2045,4 +2063,65 @@ test "Scenario: Given q quit input when checking switch picker helpers then both
     try std.testing.expect(isQuitKey('q'));
     try std.testing.expect(isQuitKey('Q'));
     try std.testing.expect(!isQuitKey('j'));
+}
+
+fn makeTestRegistry() registry.Registry {
+    return .{
+        .schema_version = registry.current_schema_version,
+        .active_account_key = null,
+        .active_account_activated_at_ms = null,
+        .auto_switch = registry.defaultAutoSwitchConfig(),
+        .api = registry.defaultApiConfig(),
+        .accounts = std.ArrayList(registry.AccountRecord).empty,
+    };
+}
+
+fn appendTestAccount(
+    allocator: std.mem.Allocator,
+    reg: *registry.Registry,
+    record_key: []const u8,
+    email: []const u8,
+    alias: []const u8,
+    plan: registry.PlanType,
+) !void {
+    const sep = std.mem.lastIndexOf(u8, record_key, "::") orelse return error.InvalidRecordKey;
+    const chatgpt_user_id = record_key[0..sep];
+    const chatgpt_account_id = record_key[sep + 2 ..];
+    try reg.accounts.append(allocator, .{
+        .account_key = try allocator.dupe(u8, record_key),
+        .chatgpt_account_id = try allocator.dupe(u8, chatgpt_account_id),
+        .chatgpt_user_id = try allocator.dupe(u8, chatgpt_user_id),
+        .email = try allocator.dupe(u8, email),
+        .alias = try allocator.dupe(u8, alias),
+        .account_name = null,
+        .plan = plan,
+        .auth_mode = .chatgpt,
+        .created_at = 1,
+        .last_used_at = null,
+        .last_usage = null,
+        .last_usage_at = null,
+        .last_local_rollout = null,
+    });
+}
+
+test "Scenario: Given grouped accounts when rendering switch list then child rows keep indentation" {
+    const gpa = std.testing.allocator;
+    var reg = makeTestRegistry();
+    defer reg.deinit(gpa);
+
+    try appendTestAccount(gpa, &reg, "user-1::acc-1", "user@example.com", "", .team);
+    reg.accounts.items[0].account_name = try gpa.dupe(u8, "Als's Workspace");
+    try appendTestAccount(gpa, &reg, "user-1::acc-2", "user@example.com", "", .free);
+
+    var rows = try buildSwitchRows(gpa, &reg);
+    defer rows.deinit(gpa);
+
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const idx_width = @max(@as(usize, 2), indexWidth(rows.selectable_row_indices.len));
+    try renderSwitchList(&writer, &reg, rows.items, idx_width, rows.widths, null, false);
+
+    const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "01   Als's Workspace") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "02   free") != null);
 }

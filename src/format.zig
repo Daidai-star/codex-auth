@@ -31,6 +31,11 @@ fn printAccountsTable(reg: *registry.Registry) !void {
     var stdout: io_util.Stdout = undefined;
     stdout.init();
     const out = stdout.out();
+    try writeAccountsTable(out, reg, colorEnabled());
+    try out.flush();
+}
+
+fn writeAccountsTable(out: *std.Io.Writer, reg: *registry.Registry, use_color: bool) !void {
     const headers = [_][]const u8{ "ACCOUNT", "PLAN", "5H USAGE", "WEEKLY USAGE", "LAST ACTIVITY" };
     var widths = [_]usize{
         headers[0].len,
@@ -40,11 +45,11 @@ fn printAccountsTable(reg: *registry.Registry) !void {
         headers[4].len,
     };
     const now = std.time.timestamp();
-    const prefix_len: usize = 2;
-    const sep_len: usize = 2;
-
     var display = try display_rows.buildDisplayRows(std.heap.page_allocator, reg, null);
     defer display.deinit(std.heap.page_allocator);
+    const idx_width = @max(@as(usize, 2), indexWidth(display.selectable_row_indices.len));
+    const prefix_len: usize = 2 + idx_width + 1;
+    const sep_len: usize = 2;
 
     for (display.rows) |row| {
         const indent: usize = @as(usize, row.depth) * 2;
@@ -70,7 +75,6 @@ fn printAccountsTable(reg: *registry.Registry) !void {
 
     adjustListWidths(&widths, prefix_len, sep_len);
 
-    const use_color = colorEnabled();
     const h0 = try truncateAlloc(headers[0], widths[0]);
     defer std.heap.page_allocator.free(h0);
     const h1 = try truncateAlloc(headers[1], widths[1]);
@@ -86,7 +90,7 @@ fn printAccountsTable(reg: *registry.Registry) !void {
     defer std.heap.page_allocator.free(h4);
 
     if (use_color) try out.writeAll(ansi.dim);
-    try out.writeAll("  ");
+    try writeRepeat(out, ' ', prefix_len);
     try writePadded(out, h0, widths[0]);
     try out.writeAll("  ");
     try writePadded(out, h1, widths[1]);
@@ -102,6 +106,7 @@ fn printAccountsTable(reg: *registry.Registry) !void {
     try out.writeAll("\n");
     if (use_color) try out.writeAll(ansi.reset);
 
+    var selectable_counter: usize = 0;
     for (display.rows) |row| {
         if (row.account_index) |account_idx| {
             const rec = reg.accounts.items[account_idx];
@@ -134,6 +139,8 @@ fn printAccountsTable(reg: *registry.Registry) !void {
                 }
             }
             try out.writeAll(if (row.is_active) "* " else "  ");
+            try writeIndexPadded(out, selectable_counter + 1, idx_width);
+            try out.writeAll(" ");
             try writeRepeat(out, ' ', indent_to_print);
             try writePadded(out, account_cell, widths[0] - indent_to_print);
             try out.writeAll("  ");
@@ -146,18 +153,17 @@ fn printAccountsTable(reg: *registry.Registry) !void {
             try writePadded(out, last_cell, widths[4]);
             try out.writeAll("\n");
             if (use_color) try out.writeAll(ansi.reset);
+            selectable_counter += 1;
         } else {
             const account_cell = try truncateAlloc(row.account_cell, widths[0]);
             defer std.heap.page_allocator.free(account_cell);
             if (use_color) try out.writeAll(ansi.dim);
-            try out.writeAll("  ");
+            try writeRepeat(out, ' ', prefix_len);
             try writePadded(out, account_cell, widths[0]);
             try out.writeAll("\n");
             if (use_color) try out.writeAll(ansi.reset);
         }
     }
-
-    try out.flush();
 }
 
 fn resolveRateWindow(usage: ?registry.RateLimitSnapshot, minutes: i64, fallback_primary: bool) ?registry.RateLimitWindow {
@@ -570,6 +576,66 @@ fn truncateAlloc(value: []const u8, max_len: usize) ![]u8 {
     return std.fmt.allocPrint(std.heap.page_allocator, "{s}.", .{value[0 .. max_len - 1]});
 }
 
+fn writeIndexPadded(out: *std.Io.Writer, idx: usize, width: usize) !void {
+    var buf: [16]u8 = undefined;
+    const idx_str = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch "0";
+    if (idx_str.len < width) {
+        var pad: usize = width - idx_str.len;
+        while (pad > 0) : (pad -= 1) {
+            try out.writeAll("0");
+        }
+    }
+    try out.writeAll(idx_str);
+}
+
+fn indexWidth(count: usize) usize {
+    var n = count;
+    var width: usize = 1;
+    while (n >= 10) : (n /= 10) {
+        width += 1;
+    }
+    return width;
+}
+
+fn makeTestRegistry() registry.Registry {
+    return .{
+        .schema_version = registry.current_schema_version,
+        .active_account_key = null,
+        .active_account_activated_at_ms = null,
+        .auto_switch = registry.defaultAutoSwitchConfig(),
+        .api = registry.defaultApiConfig(),
+        .accounts = std.ArrayList(registry.AccountRecord).empty,
+    };
+}
+
+fn appendTestAccount(
+    allocator: std.mem.Allocator,
+    reg: *registry.Registry,
+    record_key: []const u8,
+    email: []const u8,
+    alias: []const u8,
+    plan: registry.PlanType,
+) !void {
+    const sep = std.mem.lastIndexOf(u8, record_key, "::") orelse return error.InvalidRecordKey;
+    const chatgpt_user_id = record_key[0..sep];
+    const chatgpt_account_id = record_key[sep + 2 ..];
+    try reg.accounts.append(allocator, .{
+        .account_key = try allocator.dupe(u8, record_key),
+        .chatgpt_account_id = try allocator.dupe(u8, chatgpt_account_id),
+        .chatgpt_user_id = try allocator.dupe(u8, chatgpt_user_id),
+        .email = try allocator.dupe(u8, email),
+        .alias = try allocator.dupe(u8, alias),
+        .account_name = null,
+        .plan = plan,
+        .auth_mode = .chatgpt,
+        .created_at = 1,
+        .last_used_at = null,
+        .last_usage = null,
+        .last_usage_at = null,
+        .last_local_rollout = null,
+    });
+}
+
 test "printTableRow handles long cells without underflow" {
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
@@ -600,4 +666,22 @@ test "formatRateLimitFullAlloc shows 100% after reset instead of dash-prefixed v
     defer std.heap.page_allocator.free(formatted);
 
     try std.testing.expectEqualStrings("100%", formatted);
+}
+
+test "writeAccountsTable shows zero-padded row numbers for selectable accounts" {
+    const gpa = std.testing.allocator;
+    var reg = makeTestRegistry();
+    defer reg.deinit(gpa);
+
+    try appendTestAccount(gpa, &reg, "user-1::acc-1", "user@example.com", "", .team);
+    reg.accounts.items[0].account_name = try gpa.dupe(u8, "Als's Workspace");
+    try appendTestAccount(gpa, &reg, "user-1::acc-2", "user@example.com", "", .free);
+
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeAccountsTable(&writer, &reg, false);
+
+    const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "01   Als's Workspace") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "02   free") != null);
 }

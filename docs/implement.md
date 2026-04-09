@@ -287,6 +287,7 @@ Latest rollout `.jsonl` rate limit record shape (from an `event_msg` + `token_co
 ## Output Notes
 
 - Default list table columns: `ACCOUNT`, `PLAN`, `5H USAGE`, `WEEKLY`, `LAST ACTIVITY`.
+- `list` adds a zero-padded leading row number for selectable accounts, such as `01`, `02`.
 - Human-readable `list`, `switch`, and `remove` group records by email when the same email owns multiple account snapshots.
 - In grouped output:
   - the top-level email line is a header only
@@ -295,7 +296,7 @@ Latest rollout `.jsonl` rate limit record shape (from an `event_msg` + `token_co
   - otherwise the child label is the plan name (`team`, `plus`, etc.)
   - repeated plans under the same email are rendered as stable numbered labels like `team #1`, `team #2`
 - Single-account emails still render as one flat row; when an alias is set, that row shows `(alias)email`.
-- The switch/remove UI shows `ACCOUNT`, `PLAN`, `5H`, `WEEKLY`, `LAST`.
+- The switch/remove UI shows `ACCOUNT`, `PLAN`, `5H`, `WEEKLY`, `LAST`, and preserves grouped child indentation.
 - Usage limit cells show remaining percent plus reset time: `NN% (HH:MM)` for same-day resets, or `NN% (HH:MM on D Mon)` when the reset is on a different day.
 - `LAST ACTIVITY` is derived from `last_usage_at` and rendered as a relative time like `Now` or `2m ago`.
 - `PLAN` comes from the auth claim when available, and falls back to the last usage snapshot's `plan_type` (e.g. `free`, `plus`, `team`).
