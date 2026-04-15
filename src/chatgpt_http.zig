@@ -6,6 +6,8 @@ pub const browser_user_agent: []const u8 = "Mozilla/5.0 (Windows NT 10.0; Win64;
 pub const node_executable_env = "CODEX_AUTH_NODE_EXECUTABLE";
 pub const node_requirement_hint = "Node.js 18+ is required for ChatGPT API refresh. Install Node.js 18+ or use the npm package.";
 
+const max_output_bytes = 1024 * 1024;
+
 pub const HttpResult = struct {
     body: []u8,
     status_code: ?u16,
@@ -22,6 +24,17 @@ const ParsedNodeHttpOutput = struct {
     body: []u8,
     status_code: ?u16,
     outcome: NodeOutcome,
+};
+
+const ChildCaptureResult = struct {
+    term: std.process.Child.Term,
+    stdout: []u8,
+    stderr: []u8,
+
+    fn deinit(self: *const ChildCaptureResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.stdout);
+        allocator.free(self.stderr);
+    }
 };
 
 const node_request_script =
@@ -81,19 +94,16 @@ fn runNodeGetJsonCommand(
     const node_executable = try resolveNodeExecutable(allocator);
     defer allocator.free(node_executable);
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{
-            node_executable,
-            "-e",
-            node_request_script,
-            endpoint,
-            access_token,
-            account_id,
-            request_timeout_ms,
-            browser_user_agent,
-        },
-        .max_output_bytes = 1024 * 1024,
+    // Use an explicit wait path so failed output collection cannot strand zombies.
+    const result = runChildCapture(allocator, &.{
+        node_executable,
+        "-e",
+        node_request_script,
+        endpoint,
+        access_token,
+        account_id,
+        request_timeout_ms,
+        browser_user_agent,
     }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         error.FileNotFound => {
@@ -102,24 +112,14 @@ fn runNodeGetJsonCommand(
         },
         else => return error.RequestFailed,
     };
-    defer allocator.free(result.stderr);
+    defer result.deinit(allocator);
 
     switch (result.term) {
-        .Exited => |code| if (code != 0) {
-            allocator.free(result.stdout);
-            return error.RequestFailed;
-        },
-        else => {
-            allocator.free(result.stdout);
-            return error.RequestFailed;
-        },
+        .Exited => |code| if (code != 0) return error.RequestFailed,
+        else => return error.RequestFailed,
     }
 
-    const parsed = parseNodeHttpOutput(allocator, result.stdout) orelse {
-        allocator.free(result.stdout);
-        return error.CommandFailed;
-    };
-    allocator.free(result.stdout);
+    const parsed = parseNodeHttpOutput(allocator, result.stdout) orelse return error.CommandFailed;
 
     switch (parsed.outcome) {
         .ok => return .{
@@ -140,6 +140,39 @@ fn runNodeGetJsonCommand(
             return error.NodeJsRequired;
         },
     }
+}
+
+fn runChildCapture(allocator: std.mem.Allocator, argv: []const []const u8) !ChildCaptureResult {
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    var stdout = std.ArrayList(u8).empty;
+    errdefer stdout.deinit(allocator);
+    var stderr = std.ArrayList(u8).empty;
+    errdefer stderr.deinit(allocator);
+
+    try child.spawn();
+    errdefer reapChildAfterError(&child);
+
+    try child.collectOutput(allocator, &stdout, &stderr, max_output_bytes);
+    const term = try child.wait();
+
+    return .{
+        .term = term,
+        .stdout = try stdout.toOwnedSlice(allocator),
+        .stderr = try stderr.toOwnedSlice(allocator),
+    };
+}
+
+fn reapChildAfterError(child: *std.process.Child) void {
+    _ = child.kill() catch |err| switch (err) {
+        error.AlreadyTerminated => {
+            _ = child.wait() catch {};
+        },
+        else => {},
+    };
 }
 
 fn resolveNodeExecutable(allocator: std.mem.Allocator) ![]u8 {
@@ -208,3 +241,4 @@ test "parse node http output keeps timeout marker" {
     try std.testing.expectEqual(@as(?u16, null), parsed.status_code);
     try std.testing.expectEqual(@as(usize, 0), parsed.body.len);
 }
+
