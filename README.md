@@ -128,8 +128,8 @@ Remove-Item "$env:LOCALAPPDATA\codex-auth\bin\codex-auth-auto.exe" -Force -Error
 
 | Command | Description |
 |---------|-------------|
-| `codex-auth config auto enable\|disable` | Enable or disable background auto-switching |
-| `codex-auth config auto [--5h <%>] [--weekly <%>]` | Set auto-switch thresholds |
+| `codex-auth config auto enable\|disable` | Enable or disable experimental background auto-switching |
+| `codex-auth config auto [--5h <%>] [--weekly <%>]` | Set experimental auto-switch thresholds |
 | `codex-auth config api enable\|disable` | Enable or disable both usage refresh and team name refresh API calls |
 
 ---
@@ -238,6 +238,9 @@ codex-auth status
 ### Config
 
 #### Auto-Switch
+
+> [!WARNING]
+> Auto-switch is experimental. Behavior, defaults, and platform integration may change in future releases while the feature matures.
 
 Enable or disable:
 
