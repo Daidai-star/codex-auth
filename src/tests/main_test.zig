@@ -69,6 +69,66 @@ fn appendAccount(
     });
 }
 
+test "Scenario: Given empty registry when writing account json then top-level machine fields are emitted" {
+    const gpa = std.testing.allocator;
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+
+    try main_mod.writeAccountsJson(gpa, &aw.writer, "/tmp/codex-home", &reg, null, .{});
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, aw.written(), .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.TestExpectedEqual,
+    };
+    const accounts = switch (root.get("accounts").?) {
+        .array => |array| array,
+        else => return error.TestExpectedEqual,
+    };
+    try std.testing.expectEqual(@as(i64, registry.current_schema_version), root.get("schema_version").?.integer);
+    try std.testing.expectEqualStrings("/tmp/codex-home", root.get("codex_home").?.string);
+    try std.testing.expectEqual(@as(usize, 0), accounts.items.len);
+    try std.testing.expect(!root.get("refresh").?.object.get("usage_requested").?.bool);
+}
+
+test "Scenario: Given active grouped accounts with usage when writing account json then labels and usage are stable" {
+    const gpa = std.testing.allocator;
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+
+    try appendAccount(gpa, &reg, primary_record_key, "same@example.com", "work", .team);
+    try appendAccount(gpa, &reg, secondary_record_key, "same@example.com", "", .plus);
+    reg.accounts.items[0].last_usage = .{
+        .primary = .{ .used_percent = 20.0, .window_minutes = 300, .resets_at = 4102444800 },
+        .secondary = .{ .used_percent = 60.0, .window_minutes = 10080, .resets_at = 4102444800 },
+        .credits = null,
+        .plan_type = .team,
+    };
+    reg.accounts.items[0].last_usage_at = 1000;
+    try registry.setActiveAccountKey(gpa, &reg, primary_record_key);
+
+    const overrides = [_]?[]const u8{ "401", null };
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+
+    try main_mod.writeAccountsJson(gpa, &aw.writer, "/tmp/codex-home", &reg, &overrides, .{
+        .usage_requested = true,
+        .attempted = 2,
+        .failed = 1,
+    });
+
+    const json = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"label\":\"work\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"active\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"401\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_percent\":80") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"usage_requested\":true") != null);
+}
+
 fn writeSnapshot(allocator: std.mem.Allocator, codex_home: []const u8, email: []const u8, plan: []const u8) !void {
     const account_key = try bdd.accountKeyForEmailAlloc(allocator, email);
     defer allocator.free(account_key);

@@ -33,6 +33,8 @@ fn stderrColorEnabled() bool {
 
 pub const ListOptions = struct {
     debug: bool = false,
+    json: bool = false,
+    refresh_usage: bool = false,
 };
 pub const LoginOptions = struct {
     device_auth: bool = false,
@@ -44,7 +46,11 @@ pub const ImportOptions = struct {
     purge: bool,
     source: ImportSource,
 };
-pub const SwitchOptions = struct { query: ?[]u8 };
+pub const SwitchOptions = struct {
+    query: ?[]u8,
+    account_key: ?[]u8,
+    json: bool = false,
+};
 pub const RemoveOptions = struct {
     query: ?[]u8,
     all: bool,
@@ -147,6 +153,20 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
                 opts.debug = true;
                 continue;
             }
+            if (std.mem.eql(u8, arg, "--json")) {
+                if (opts.json) {
+                    return usageErrorResult(allocator, .list, "duplicate `--json` for `list`.", .{});
+                }
+                opts.json = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--refresh-usage")) {
+                if (opts.refresh_usage) {
+                    return usageErrorResult(allocator, .list, "duplicate `--refresh-usage` for `list`.", .{});
+                }
+                opts.refresh_usage = true;
+                continue;
+            }
             if (isHelpFlag(arg)) {
                 return usageErrorResult(allocator, .list, "`--help` must be used by itself for `list`.", .{});
             }
@@ -154,6 +174,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
                 return usageErrorResult(allocator, .list, "unknown flag `{s}` for `list`.", .{arg});
             }
             return usageErrorResult(allocator, .list, "unexpected argument `{s}` for `list`.", .{arg});
+        }
+        if (opts.refresh_usage and !opts.json) {
+            return usageErrorResult(allocator, .list, "`--refresh-usage` requires `--json` for `list`.", .{});
         }
         return .{ .command = .{ .list = opts } };
     }
@@ -256,20 +279,59 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
         }
 
         var query: ?[]u8 = null;
+        var account_key: ?[]u8 = null;
+        var json = false;
         var i: usize = 2;
         while (i < args.len) : (i += 1) {
             const arg = std.mem.sliceTo(args[i], 0);
+            if (std.mem.eql(u8, arg, "--json")) {
+                if (json) {
+                    if (query) |q| allocator.free(q);
+                    if (account_key) |key| allocator.free(key);
+                    return usageErrorResult(allocator, .switch_account, "duplicate `--json` for `switch`.", .{});
+                }
+                json = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--account-key")) {
+                if (i + 1 >= args.len) {
+                    if (query) |q| allocator.free(q);
+                    if (account_key) |key| allocator.free(key);
+                    return usageErrorResult(allocator, .switch_account, "missing value for `--account-key`.", .{});
+                }
+                if (account_key != null) {
+                    if (query) |q| allocator.free(q);
+                    if (account_key) |key| allocator.free(key);
+                    return usageErrorResult(allocator, .switch_account, "duplicate `--account-key` for `switch`.", .{});
+                }
+                if (query != null) {
+                    if (query) |q| allocator.free(q);
+                    return usageErrorResult(allocator, .switch_account, "`switch` cannot combine `--account-key` with a query.", .{});
+                }
+                account_key = try allocator.dupe(u8, std.mem.sliceTo(args[i + 1], 0));
+                i += 1;
+                continue;
+            }
             if (std.mem.startsWith(u8, arg, "-")) {
                 if (query) |e| allocator.free(e);
+                if (account_key) |key| allocator.free(key);
                 return usageErrorResult(allocator, .switch_account, "unknown flag `{s}` for `switch`.", .{arg});
             }
-            if (query != null) {
+            if (query != null or account_key != null) {
                 if (query) |e| allocator.free(e);
+                if (account_key) |key| allocator.free(key);
+                if (account_key != null) {
+                    return usageErrorResult(allocator, .switch_account, "`switch` cannot combine `--account-key` with a query.", .{});
+                }
                 return usageErrorResult(allocator, .switch_account, "unexpected extra query `{s}` for `switch`.", .{arg});
             }
             query = try allocator.dupe(u8, arg);
         }
-        return .{ .command = .{ .switch_account = .{ .query = query } } };
+        if (json and account_key == null) {
+            if (query) |q| allocator.free(q);
+            return usageErrorResult(allocator, .switch_account, "`--json` requires `--account-key` for `switch`.", .{});
+        }
+        return .{ .command = .{ .switch_account = .{ .query = query, .account_key = account_key, .json = json } } };
     }
 
     if (std.mem.eql(u8, cmd, "remove")) {
@@ -411,6 +473,7 @@ fn freeCommand(allocator: std.mem.Allocator, cmd: *Command) void {
         },
         .switch_account => |*opts| {
             if (opts.query) |e| allocator.free(e);
+            if (opts.account_key) |key| allocator.free(key);
         },
         .remove_account => |*opts| {
             if (opts.query) |q| allocator.free(q);
@@ -715,7 +778,10 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth --help\n");
             try out.writeAll("  codex-auth help <command>\n");
         },
-        .list => try out.writeAll("  codex-auth list [--debug]\n"),
+        .list => {
+            try out.writeAll("  codex-auth list [--debug]\n");
+            try out.writeAll("  codex-auth list --json [--refresh-usage]\n");
+        },
         .status => try out.writeAll("  codex-auth status\n"),
         .login => {
             try out.writeAll("  codex-auth login\n");
@@ -729,6 +795,7 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         .switch_account => {
             try out.writeAll("  codex-auth switch\n");
             try out.writeAll("  codex-auth switch <query>\n");
+            try out.writeAll("  codex-auth switch --account-key <key> [--json]\n");
         },
         .remove_account => {
             try out.writeAll("  codex-auth remove\n");
@@ -762,6 +829,8 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         .list => {
             try out.writeAll("  codex-auth list\n");
             try out.writeAll("  codex-auth list --debug\n");
+            try out.writeAll("  codex-auth list --json\n");
+            try out.writeAll("  codex-auth list --json --refresh-usage\n");
         },
         .status => try out.writeAll("  codex-auth status\n"),
         .login => {
@@ -776,6 +845,7 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         .switch_account => {
             try out.writeAll("  codex-auth switch\n");
             try out.writeAll("  codex-auth switch john@example.com\n");
+            try out.writeAll("  codex-auth switch --account-key user-id::account-id --json\n");
         },
         .remove_account => {
             try out.writeAll("  codex-auth remove\n");

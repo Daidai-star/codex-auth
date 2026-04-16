@@ -49,6 +49,22 @@ npx @loongphy/codex-auth list
 > npm installs already satisfy that requirement.
 > Legacy standalone binary installs need Node.js 18+ on `PATH` when `codex-auth config api enable` is used.
 
+## macOS Menu Bar Companion
+
+This repository also includes a local macOS menu bar companion app under [`apps/macos/CodexAuthMenu`](./apps/macos/CodexAuthMenu).
+
+- Menu bar account switcher
+- Local web control page served on `127.0.0.1`
+- Manual usage refresh only
+- No direct reads or writes to Codex auth files outside the CLI JSON interface
+
+Build it from source with:
+
+```shell
+bash apps/macos/CodexAuthMenu/Scripts/build-app.sh
+open apps/macos/CodexAuthMenu/build/CodexAuthMenu.app
+```
+
 ## Storage Root
 
 `codex-auth` uses the same Codex state root as the current process. Resolution order:
