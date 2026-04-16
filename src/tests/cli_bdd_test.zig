@@ -181,6 +181,34 @@ test "Scenario: Given list with debug flag when parsing then debug mode is prese
     }
 }
 
+test "Scenario: Given list json flags when parsing then machine output options are preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "list", "--json", "--refresh-usage" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .list => |opts| {
+                try std.testing.expect(opts.json);
+                try std.testing.expect(opts.refresh_usage);
+                try std.testing.expect(!opts.debug);
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given list refresh without json when parsing then usage error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "list", "--refresh-usage" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .list, "requires `--json`");
+}
+
 test "Scenario: Given login with removed no-login flag when parsing then usage error is returned" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "login", "--no-login" };
@@ -678,6 +706,44 @@ test "Scenario: Given switch with positional query when parsing then non-interac
         },
         else => return error.TestExpectedEqual,
     }
+}
+
+test "Scenario: Given switch account-key json when parsing then exact machine target is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "switch", "--account-key", "user::account", "--json" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .switch_account => |opts| {
+                try std.testing.expect(opts.query == null);
+                try std.testing.expect(opts.account_key != null);
+                try std.testing.expect(std.mem.eql(u8, opts.account_key.?, "user::account"));
+                try std.testing.expect(opts.json);
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given switch json without account key when parsing then usage error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "switch", "--json" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .switch_account, "requires `--account-key`");
+}
+
+test "Scenario: Given switch account key and query when parsing then usage error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "switch", "--account-key", "user::account", "user@example.com" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .switch_account, "cannot combine");
 }
 
 test "Scenario: Given switch with duplicate target when parsing then usage error is returned" {

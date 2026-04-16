@@ -77,6 +77,216 @@ pub const ForegroundUsageRefreshState = struct {
     }
 };
 
+pub const JsonRefreshSummary = struct {
+    usage_requested: bool = false,
+    attempted: usize = 0,
+    updated: usize = 0,
+    failed: usize = 0,
+    unchanged: usize = 0,
+    local_only_mode: bool = false,
+};
+
+fn jsonString(out: *std.Io.Writer, value: []const u8) !void {
+    try std.json.Stringify.value(value, .{}, out);
+}
+
+fn writeOptionalJsonString(out: *std.Io.Writer, value: ?[]const u8) !void {
+    if (value) |text| {
+        try jsonString(out, text);
+    } else {
+        try out.writeAll("null");
+    }
+}
+
+fn writeOptionalI64(out: *std.Io.Writer, value: ?i64) !void {
+    if (value) |number| {
+        try out.print("{d}", .{number});
+    } else {
+        try out.writeAll("null");
+    }
+}
+
+fn writeOptionalBool(out: *std.Io.Writer, value: bool) !void {
+    try out.writeAll(if (value) "true" else "false");
+}
+
+fn planJsonLabel(plan: ?registry.PlanType) ?[]const u8 {
+    return if (plan) |value| registry.planLabel(value) else null;
+}
+
+fn authModeJsonLabel(mode: ?registry.AuthMode) ?[]const u8 {
+    return switch (mode orelse return null) {
+        .chatgpt => "chatgpt",
+        .apikey => "apikey",
+    };
+}
+
+fn accountLabelForDisplay(
+    display: *const display_rows.DisplayRows,
+    account_idx: usize,
+    fallback: []const u8,
+) []const u8 {
+    for (display.rows) |row| {
+        if (row.account_index) |idx| {
+            if (idx == account_idx) return row.account_cell;
+        }
+    }
+    return fallback;
+}
+
+fn writeWindowJson(out: *std.Io.Writer, window: ?registry.RateLimitWindow, now: i64) !void {
+    if (window == null) {
+        try out.writeAll("null");
+        return;
+    }
+    const value = window.?;
+    try out.writeAll("{");
+    try out.writeAll("\"used_percent\":");
+    try out.print("{d}", .{value.used_percent});
+    try out.writeAll(",\"remaining_percent\":");
+    if (registry.remainingPercentAt(value, now)) |remaining| {
+        try out.print("{d}", .{remaining});
+    } else {
+        try out.writeAll("null");
+    }
+    try out.writeAll(",\"window_minutes\":");
+    try writeOptionalI64(out, value.window_minutes);
+    try out.writeAll(",\"resets_at\":");
+    try writeOptionalI64(out, value.resets_at);
+    try out.writeAll("}");
+}
+
+fn writeCreditsJson(out: *std.Io.Writer, credits: ?registry.CreditsSnapshot) !void {
+    if (credits == null) {
+        try out.writeAll("null");
+        return;
+    }
+    const value = credits.?;
+    try out.writeAll("{\"has_credits\":");
+    try writeOptionalBool(out, value.has_credits);
+    try out.writeAll(",\"unlimited\":");
+    try writeOptionalBool(out, value.unlimited);
+    try out.writeAll(",\"balance\":");
+    try writeOptionalJsonString(out, value.balance);
+    try out.writeAll("}");
+}
+
+fn writeUsageJson(
+    out: *std.Io.Writer,
+    snapshot: ?registry.RateLimitSnapshot,
+    usage_override: ?[]const u8,
+    now: i64,
+) !void {
+    if (snapshot == null and usage_override == null) {
+        try out.writeAll("null");
+        return;
+    }
+
+    try out.writeAll("{\"status\":");
+    try jsonString(out, usage_override orelse "ok");
+    const rate_5h = registry.resolveRateWindow(snapshot, 300, true);
+    const rate_week = registry.resolveRateWindow(snapshot, 10080, false);
+    try out.writeAll(",\"five_hour\":");
+    try writeWindowJson(out, rate_5h, now);
+    try out.writeAll(",\"weekly\":");
+    try writeWindowJson(out, rate_week, now);
+    try out.writeAll(",\"credits\":");
+    try writeCreditsJson(out, if (snapshot) |value| value.credits else null);
+    try out.writeAll("}");
+}
+
+fn usageOverrideForAccount(
+    usage_overrides: ?[]const ?[]const u8,
+    account_idx: usize,
+) ?[]const u8 {
+    const overrides = usage_overrides orelse return null;
+    if (account_idx >= overrides.len) return null;
+    return overrides[account_idx];
+}
+
+pub fn writeAccountsJson(
+    allocator: std.mem.Allocator,
+    out: *std.Io.Writer,
+    codex_home: []const u8,
+    reg: *registry.Registry,
+    usage_overrides: ?[]const ?[]const u8,
+    refresh: JsonRefreshSummary,
+) !void {
+    var display = try display_rows.buildDisplayRows(allocator, reg, null);
+    defer display.deinit(allocator);
+    const now = std.time.timestamp();
+
+    try out.writeAll("{\"schema_version\":");
+    try out.print("{d}", .{reg.schema_version});
+    try out.writeAll(",\"codex_home\":");
+    try jsonString(out, codex_home);
+    try out.writeAll(",\"active_account_key\":");
+    try writeOptionalJsonString(out, reg.active_account_key);
+    try out.writeAll(",\"api\":{\"usage\":");
+    try writeOptionalBool(out, reg.api.usage);
+    try out.writeAll(",\"account\":");
+    try writeOptionalBool(out, reg.api.account);
+    try out.writeAll("},\"accounts\":[");
+    for (reg.accounts.items, 0..) |rec, idx| {
+        if (idx != 0) try out.writeAll(",");
+        const active = if (reg.active_account_key) |key|
+            std.mem.eql(u8, key, rec.account_key)
+        else
+            false;
+        const label = accountLabelForDisplay(&display, idx, rec.email);
+        try out.writeAll("{\"account_key\":");
+        try jsonString(out, rec.account_key);
+        try out.writeAll(",\"label\":");
+        try jsonString(out, label);
+        try out.writeAll(",\"email\":");
+        try jsonString(out, rec.email);
+        try out.writeAll(",\"alias\":");
+        try jsonString(out, rec.alias);
+        try out.writeAll(",\"account_name\":");
+        try writeOptionalJsonString(out, rec.account_name);
+        try out.writeAll(",\"plan\":");
+        try writeOptionalJsonString(out, planJsonLabel(registry.resolvePlan(&rec)));
+        try out.writeAll(",\"auth_mode\":");
+        try writeOptionalJsonString(out, authModeJsonLabel(rec.auth_mode));
+        try out.writeAll(",\"active\":");
+        try writeOptionalBool(out, active);
+        try out.writeAll(",\"last_used_at\":");
+        try writeOptionalI64(out, rec.last_used_at);
+        try out.writeAll(",\"last_usage_at\":");
+        try writeOptionalI64(out, rec.last_usage_at);
+        try out.writeAll(",\"usage\":");
+        try writeUsageJson(out, rec.last_usage, usageOverrideForAccount(usage_overrides, idx), now);
+        try out.writeAll("}");
+    }
+    try out.writeAll("],\"refresh\":{\"usage_requested\":");
+    try writeOptionalBool(out, refresh.usage_requested);
+    try out.writeAll(",\"attempted\":");
+    try out.print("{d}", .{refresh.attempted});
+    try out.writeAll(",\"updated\":");
+    try out.print("{d}", .{refresh.updated});
+    try out.writeAll(",\"failed\":");
+    try out.print("{d}", .{refresh.failed});
+    try out.writeAll(",\"unchanged\":");
+    try out.print("{d}", .{refresh.unchanged});
+    try out.writeAll(",\"local_only_mode\":");
+    try writeOptionalBool(out, refresh.local_only_mode);
+    try out.writeAll("}}\n");
+}
+
+fn printAccountsJson(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *registry.Registry,
+    usage_overrides: ?[]const ?[]const u8,
+    refresh: JsonRefreshSummary,
+) !void {
+    var stdout: io_util.Stdout = undefined;
+    stdout.init();
+    const out = stdout.out();
+    try writeAccountsJson(allocator, out, codex_home, reg, usage_overrides, refresh);
+    try out.flush();
+}
+
 const DebugUsageLabelState = struct {
     labels: [][]const u8,
     display_order: []usize,
@@ -922,6 +1132,28 @@ fn handleList(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.Li
     if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
         try registry.saveRegistry(allocator, codex_home, &reg);
     }
+    if (opts.json) {
+        if (opts.refresh_usage) {
+            var usage_state = try refreshForegroundUsageForDisplayWithApiFetcher(
+                allocator,
+                codex_home,
+                &reg,
+                usage_api.fetchUsageForAuthPathDetailed,
+            );
+            defer usage_state.deinit(allocator);
+            try printAccountsJson(allocator, codex_home, &reg, usage_state.usage_overrides, .{
+                .usage_requested = true,
+                .attempted = usage_state.attempted,
+                .updated = usage_state.updated,
+                .failed = usage_state.failed,
+                .unchanged = usage_state.unchanged,
+                .local_only_mode = usage_state.local_only_mode,
+            });
+        } else {
+            try printAccountsJson(allocator, codex_home, &reg, null, .{});
+        }
+        return;
+    }
     var usage_state = try refreshForegroundUsageForDisplayWithApiFetcher(
         allocator,
         codex_home,
@@ -1003,6 +1235,18 @@ fn handleSwitch(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.
     defer reg.deinit(allocator);
     if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
         try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+    if (opts.account_key) |account_key| {
+        if (registry.findAccountIndexByAccountKey(&reg, account_key) == null) {
+            try cli.printAccountNotFoundError(account_key);
+            return error.AccountNotFound;
+        }
+        try registry.activateAccountByKey(allocator, codex_home, &reg, account_key);
+        try registry.saveRegistry(allocator, codex_home, &reg);
+        if (opts.json) {
+            try printAccountsJson(allocator, codex_home, &reg, null, .{});
+        }
+        return;
     }
     var usage_state = try refreshForegroundUsageForDisplayWithApiFetcher(
         allocator,

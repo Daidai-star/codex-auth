@@ -3,8 +3,11 @@ zig-out/
 .zig-cache/
 dist/
 *.tgz
+apps/macos/CodexAuthMenu/build/
+apps/macos/CodexAuthMenu/Resources/AppIcon.iconset/
 
 # IDE/Editor
+.DS_Store
 .idea/
 
 # Local benchmarking workspace

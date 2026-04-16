@@ -644,6 +644,69 @@ test "Scenario: Given first-time use on v0.2 with an existing auth.json and no a
     try std.testing.expect(std.mem.eql(u8, snapshot_data, active_data));
 }
 
+test "Scenario: Given exact account key when running switch json then cli switches without interactive selection" {
+    const gpa = std.testing.allocator;
+    const project_root = try projectRootAlloc(gpa);
+    defer gpa.free(project_root);
+    try buildCliBinary(gpa, project_root);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(home_root);
+    try tmp.dir.makePath(".codex/accounts");
+
+    const codex_home = try codexHomeAlloc(gpa, home_root);
+    defer gpa.free(codex_home);
+
+    const active_email = "active-switch-json@example.com";
+    const target_email = "target-switch-json@example.com";
+    const active_auth = try bdd.authJsonWithEmailPlan(gpa, active_email, "plus");
+    defer gpa.free(active_auth);
+    const target_auth = try bdd.authJsonWithEmailPlan(gpa, target_email, "team");
+    defer gpa.free(target_auth);
+    const active_key = try bdd.accountKeyForEmailAlloc(gpa, active_email);
+    defer gpa.free(active_key);
+    const target_key = try bdd.accountKeyForEmailAlloc(gpa, target_email);
+    defer gpa.free(target_key);
+
+    var reg = bdd.makeEmptyRegistry();
+    defer reg.deinit(gpa);
+    try bdd.appendAccount(gpa, &reg, active_email, "", .plus);
+    try bdd.appendAccount(gpa, &reg, target_email, "work", .team);
+    try registry.setActiveAccountKey(gpa, &reg, active_key);
+    try registry.saveRegistry(gpa, codex_home, &reg);
+
+    const active_snapshot_path = try registry.accountAuthPath(gpa, codex_home, active_key);
+    defer gpa.free(active_snapshot_path);
+    try std.fs.cwd().writeFile(.{ .sub_path = active_snapshot_path, .data = active_auth });
+    const target_snapshot_path = try registry.accountAuthPath(gpa, codex_home, target_key);
+    defer gpa.free(target_snapshot_path);
+    try std.fs.cwd().writeFile(.{ .sub_path = target_snapshot_path, .data = target_auth });
+    try tmp.dir.writeFile(.{ .sub_path = ".codex/auth.json", .data = active_auth });
+
+    const result = try runCliWithIsolatedHome(gpa, project_root, home_root, &[_][]const u8{ "switch", "--account-key", target_key, "--json" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try expectSuccess(result);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "\"active_account_key\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, target_key) != null);
+    try std.testing.expectEqualStrings("", result.stderr);
+
+    const active_auth_path = try authJsonPathAlloc(gpa, home_root);
+    defer gpa.free(active_auth_path);
+    const switched_auth = try bdd.readFileAlloc(gpa, active_auth_path);
+    defer gpa.free(switched_auth);
+    try std.testing.expectEqualStrings(target_auth, switched_auth);
+
+    var loaded = try registry.loadRegistry(gpa, codex_home);
+    defer loaded.deinit(gpa);
+    try std.testing.expect(loaded.active_account_key != null);
+    try std.testing.expect(std.mem.eql(u8, loaded.active_account_key.?, target_key));
+}
+
 // This simulates a real v0.1.x -> v0.2 upgrade:
 // the old email-keyed registry and snapshot exist under ~/.codex/accounts before the new binary runs.
 test "Scenario: Given upgrade from v0.1.x to v0.2 with legacy accounts data when list runs then cli migrates registry and keeps account usable" {
