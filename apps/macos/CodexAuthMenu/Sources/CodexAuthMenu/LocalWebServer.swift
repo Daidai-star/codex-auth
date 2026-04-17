@@ -163,6 +163,16 @@ final class LocalWebServer {
                 onStateChanged?()
                 let body = try jsonData(state)
                 send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("POST", "/api/sync-history"):
+                let summary = try cliClient.syncHistory()
+                let body = try jsonData(HistorySyncResponse(
+                    ok: true,
+                    mirroredThreads: summary.mirroredThreads,
+                    message: summary.mirroredThreads > 0
+                        ? "历史会话同步完成：新增 \(summary.mirroredThreads) 个镜像会话。"
+                        : "历史会话已检查：没有需要补齐的镜像会话。"
+                ))
+                send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("POST", "/api/login"):
                 let request = try JSONDecoder().decode(LoginRequest.self, from: request.body)
                 try loginLauncher(cliClient, request.deviceAuth)
@@ -471,4 +481,16 @@ private struct ErrorResponse: Codable {
 private struct ActionResponse: Codable {
     var ok: Bool
     var message: String
+}
+
+private struct HistorySyncResponse: Codable {
+    var ok: Bool
+    var mirroredThreads: Int
+    var message: String
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case mirroredThreads = "mirrored_threads"
+        case message
+    }
 }

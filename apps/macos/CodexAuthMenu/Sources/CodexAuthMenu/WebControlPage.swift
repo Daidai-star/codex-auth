@@ -804,6 +804,7 @@ enum WebControlPage {
           <div class="button-row">
             <button class="button primary" id="refreshCurrent">同步当前额度</button>
             <button class="button secondary" id="refreshAll">刷新全部额度</button>
+            <button class="button secondary" id="syncHistory">同步历史会话</button>
             <button class="button secondary" id="reload">重新加载</button>
             <button class="button secondary" id="addAccount">账号登录</button>
             <button class="button secondary" id="deviceAuth">设备码登录</button>
@@ -875,6 +876,7 @@ enum WebControlPage {
     const reloadEl = document.getElementById("reload");
     const refreshCurrentEl = document.getElementById("refreshCurrent");
     const refreshAllEl = document.getElementById("refreshAll");
+    const syncHistoryEl = document.getElementById("syncHistory");
     const restartToggleEl = document.getElementById("restartToggle");
     const toggleLabelEl = document.getElementById("toggleLabel");
     const preferenceNoteEl = document.getElementById("preferenceNote");
@@ -907,6 +909,7 @@ enum WebControlPage {
       reloadEl.disabled = disabled;
       refreshCurrentEl.disabled = disabled;
       refreshAllEl.disabled = disabled || !state.api || state.api.usage !== true;
+      syncHistoryEl.disabled = disabled;
       restartToggleEl.disabled = disabled || state.preferenceBusy;
       usageApiToggleEl.disabled = disabled || state.apiBusy;
     }
@@ -1495,6 +1498,24 @@ enum WebControlPage {
       }
     }
 
+    async function syncHistory() {
+      state.busy = true;
+      syncControls();
+      setStatus("正在同步历史会话", "neutral");
+      try {
+        const { payload } = await api("/api/sync-history", { method: "POST" });
+        setStatus(
+          (payload && payload.message) || "历史会话已同步。",
+          payload && payload.mirrored_threads > 0 ? "success" : "neutral"
+        );
+      } catch (error) {
+        setStatus(error.message || "同步历史会话失败", "error");
+      } finally {
+        state.busy = false;
+        render();
+      }
+    }
+
     async function startLogin(deviceAuth) {
       state.busy = true;
       syncControls();
@@ -1570,6 +1591,7 @@ enum WebControlPage {
     reloadEl.addEventListener("click", () => load("state"));
     refreshCurrentEl.addEventListener("click", () => load("refreshCurrent"));
     refreshAllEl.addEventListener("click", () => load("refreshAll"));
+    syncHistoryEl.addEventListener("click", () => syncHistory());
     restartToggleEl.addEventListener("change", () => savePreferences(restartToggleEl.checked));
     usageApiToggleEl.addEventListener("change", () => saveAPIConfig({
       usage_account_enabled: usageApiToggleEl.checked

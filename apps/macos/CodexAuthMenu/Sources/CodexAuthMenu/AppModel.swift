@@ -126,6 +126,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func syncHistory() {
+        isBusy = true
+        statusMessage = "正在同步历史会话"
+        let client = cliClient
+        Task.detached {
+            do {
+                let summary = try client.syncHistory()
+                await MainActor.run {
+                    self.statusMessage = summary.mirroredThreads > 0
+                        ? "历史会话同步完成：新增 \(summary.mirroredThreads) 个镜像会话"
+                        : "历史会话已检查：没有需要补齐的镜像会话"
+                    self.isBusy = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.statusMessage = error.localizedDescription
+                    self.isBusy = false
+                }
+            }
+        }
+    }
+
     var sortedAccounts: [Account] {
         (state?.accounts ?? []).sorted(by: Self.compareAccounts)
     }

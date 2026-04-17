@@ -39,6 +39,10 @@ struct CommandResult: Sendable {
     }
 }
 
+struct HistorySyncSummary: Sendable {
+    var mirroredThreads: Int
+}
+
 struct CLIClient: Sendable {
     let executablePath: String?
     private let commandRunner: CLICommandRunner
@@ -133,6 +137,11 @@ struct CLIClient: Sendable {
         return result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func syncHistory() throws -> HistorySyncSummary {
+        let result = try run(["sync-history"])
+        return try decodeHistorySyncSummary(result.stdoutText)
+    }
+
     func openLoginInTerminal(deviceAuth: Bool) throws {
         guard let executablePath else {
             throw CLIClientError.missingCLI
@@ -194,6 +203,20 @@ struct CLIClient: Sendable {
     private func loadState(args: [String]) throws -> CodexState {
         let result = try run(args)
         return try decodeState(result.stdout)
+    }
+
+    private func decodeHistorySyncSummary(_ text: String) throws -> HistorySyncSummary {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let range = trimmed.range(of: "mirrored_threads=") else {
+            throw CLIClientError.invalidOutput("codex-auth 返回了无法识别的历史同步结果：\(trimmed)")
+        }
+
+        let numberText = trimmed[range.upperBound...]
+            .prefix { $0.isNumber }
+        guard let mirroredThreads = Int(numberText) else {
+            throw CLIClientError.invalidOutput("codex-auth 返回了无法识别的历史同步结果：\(trimmed)")
+        }
+        return HistorySyncSummary(mirroredThreads: mirroredThreads)
     }
 
     private func loadStateRefreshingActiveAccount() throws -> CodexState {

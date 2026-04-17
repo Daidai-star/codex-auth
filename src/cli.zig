@@ -57,6 +57,7 @@ pub const RemoveOptions = struct {
     all: bool,
 };
 pub const CleanOptions = struct {};
+pub const SyncHistoryOptions = struct {};
 pub const AutoAction = enum { enable, disable };
 pub const AutoThresholdOptions = struct {
     threshold_5h_percent: ?u8,
@@ -97,6 +98,7 @@ pub const HelpTopic = enum {
     renewal,
     remove_account,
     clean,
+    sync_history,
     config,
     daemon,
 };
@@ -109,6 +111,7 @@ pub const Command = union(enum) {
     renewal: RenewalOptions,
     remove_account: RemoveOptions,
     clean: CleanOptions,
+    sync_history: SyncHistoryOptions,
     config: ConfigOptions,
     status: void,
     daemon: DaemonOptions,
@@ -496,6 +499,10 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
         return try parseSimpleCommandArgs(allocator, "clean", .clean, .{ .clean = .{} }, args[2..]);
     }
 
+    if (std.mem.eql(u8, cmd, "sync-history")) {
+        return try parseSimpleCommandArgs(allocator, "sync-history", .sync_history, .{ .sync_history = .{} }, args[2..]);
+    }
+
     if (std.mem.eql(u8, cmd, "status")) {
         return try parseSimpleCommandArgs(allocator, "status", .status, .{ .status = {} }, args[2..]);
     }
@@ -673,6 +680,7 @@ fn helpTopicForName(name: []const u8) ?HelpTopic {
     if (std.mem.eql(u8, name, "renewal")) return .renewal;
     if (std.mem.eql(u8, name, "remove")) return .remove_account;
     if (std.mem.eql(u8, name, "clean")) return .clean;
+    if (std.mem.eql(u8, name, "sync-history")) return .sync_history;
     if (std.mem.eql(u8, name, "config")) return .config;
     if (std.mem.eql(u8, name, "daemon")) return .daemon;
     return null;
@@ -751,6 +759,7 @@ pub fn writeHelp(
         .{ .name = "renewal", .description = "Manage next renewal dates" },
         .{ .name = "remove [<query>|--all]", .description = "Remove one or more accounts" },
         .{ .name = "clean", .description = "Delete backup and stale files under accounts/" },
+        .{ .name = "sync-history", .description = "Mirror local history across account and API providers" },
         .{ .name = "config", .description = "Manage configuration" },
     };
     const import_details = [_]HelpEntry{
@@ -787,6 +796,7 @@ pub fn writeHelp(
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[7].name, commands[7].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[8].name, commands[8].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[9].name, commands[9].description);
+    try writeHelpEntry(out, use_color, parent_indent, command_col, commands[10].name, commands[10].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[0].name, config_details[0].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[1].name, config_details[1].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[2].name, config_details[2].description);
@@ -917,6 +927,7 @@ fn commandNameForTopic(topic: HelpTopic) []const u8 {
         .renewal => "renewal",
         .remove_account => "remove",
         .clean => "clean",
+        .sync_history => "sync-history",
         .config => "config",
         .daemon => "daemon",
     };
@@ -933,6 +944,7 @@ fn commandDescriptionForTopic(topic: HelpTopic) []const u8 {
         .renewal => "Manage manually recorded next-renewal dates.",
         .remove_account => "Remove one or more accounts.",
         .clean => "Delete backup and stale files under accounts/.",
+        .sync_history => "Mirror local history across account and API providers.",
         .config => "Manage auto-switch and API configuration.",
         .daemon => "Run the background auto-switch daemon.",
     };
@@ -982,6 +994,7 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth remove --all\n");
         },
         .clean => try out.writeAll("  codex-auth clean\n"),
+        .sync_history => try out.writeAll("  codex-auth sync-history\n"),
         .config => {
             try out.writeAll("  codex-auth config auto enable\n");
             try out.writeAll("  codex-auth config auto disable\n");
@@ -1037,6 +1050,7 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth remove --all\n");
         },
         .clean => try out.writeAll("  codex-auth clean\n"),
+        .sync_history => try out.writeAll("  codex-auth sync-history\n"),
         .config => {
             try out.writeAll("  codex-auth config auto --5h 12 --weekly 8\n");
             try out.writeAll("  codex-auth config api enable\n");
@@ -1073,6 +1087,7 @@ fn helpCommandForTopic(topic: HelpTopic) []const u8 {
         .renewal => "codex-auth renewal --help",
         .remove_account => "codex-auth remove --help",
         .clean => "codex-auth clean --help",
+        .sync_history => "codex-auth sync-history --help",
         .config => "codex-auth config --help",
         .daemon => "codex-auth daemon --help",
     };

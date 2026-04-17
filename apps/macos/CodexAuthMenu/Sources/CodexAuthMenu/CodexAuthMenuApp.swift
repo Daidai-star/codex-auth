@@ -336,6 +336,11 @@ private struct QuickActionsCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                ActionRowButton(title: "同步历史会话", icon: "clock.arrow.trianglehead.counterclockwise.rotate.90") {
+                    model.syncHistory()
+                }
+                .disabled(model.isBusy)
+
                 Toggle(
                     "切换后自动重启 Codex App",
                     isOn: Binding(

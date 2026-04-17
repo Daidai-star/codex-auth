@@ -4,6 +4,7 @@ const account_api = @import("account_api.zig");
 const account_name_refresh = @import("account_name_refresh.zig");
 const cli = @import("cli.zig");
 const display_rows = @import("display_rows.zig");
+const history_sync = @import("history_sync.zig");
 const registry = @import("registry.zig");
 const auth = @import("auth.zig");
 const auto = @import("auto.zig");
@@ -413,6 +414,7 @@ fn runMainArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             .watch => try auto.runDaemon(allocator, codex_home.?),
             .once => try auto.runDaemonOnce(allocator, codex_home.?),
         },
+        .sync_history => try handleSyncHistory(allocator, codex_home.?),
         .config => |opts| try handleConfig(allocator, codex_home.?, opts),
         .list => |opts| try handleList(allocator, codex_home.?, opts),
         .login => |opts| try handleLogin(allocator, codex_home.?, opts),
@@ -440,7 +442,7 @@ fn isHandledCliError(err: anyerror) bool {
 pub fn shouldReconcileManagedService(cmd: cli.Command) bool {
     if (io_util.hasNonEmptyEnvVarConstant(skip_service_reconcile_env)) return false;
     return switch (cmd) {
-        .help, .version, .status, .daemon => false,
+        .help, .version, .status, .daemon, .sync_history => false,
         else => true,
     };
 }
@@ -1292,6 +1294,9 @@ fn handleLogin(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.L
     try registry.setActiveAccountKey(allocator, &reg, record_key);
     _ = try refreshAccountNamesAfterLogin(allocator, &reg, &info, defaultAccountFetcher);
     try registry.saveRegistry(allocator, codex_home, &reg);
+    _ = history_sync.ensureDualProviderHistory(allocator, codex_home) catch |err| {
+        std.log.warn("history sync skipped after login: {s}", .{@errorName(err)});
+    };
 }
 
 fn handleImport(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ImportOptions) !void {
@@ -1696,6 +1701,15 @@ fn handleClean(allocator: std.mem.Allocator, codex_home: []const u8) !void {
     try out.flush();
 }
 
+fn handleSyncHistory(allocator: std.mem.Allocator, codex_home: []const u8) !void {
+    const summary = try history_sync.ensureDualProviderHistory(allocator, codex_home);
+    var stdout: io_util.Stdout = undefined;
+    stdout.init();
+    const out = stdout.out();
+    try out.print("history sync complete: mirrored_threads={d}\n", .{summary.mirrored_threads});
+    try out.flush();
+}
+
 test "background account-name refresh returns early when another refresh holds the lock" {
     const TestState = struct {
         var fetch_count: usize = 0;
@@ -1738,6 +1752,7 @@ test "background account-name refresh returns early when another refresh holds t
 test {
     _ = @import("tests/auth_test.zig");
     _ = @import("tests/sessions_test.zig");
+    _ = @import("tests/history_sync_test.zig");
     _ = @import("tests/account_api_test.zig");
     _ = @import("tests/usage_api_test.zig");
     _ = @import("tests/auto_test.zig");

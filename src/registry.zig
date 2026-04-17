@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const account_api = @import("account_api.zig");
+const history_sync = @import("history_sync.zig");
 const io_util = @import("io_util.zig");
 const c_time = @cImport({
     @cInclude("time.h");
@@ -1702,14 +1703,19 @@ pub fn markAccountRenewalStatus(
 
 pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []const u8, reg: *Registry) !bool {
     if (reg.accounts.items.len == 0) {
-        return try autoImportActiveAuth(allocator, codex_home, reg);
+        const changed = try autoImportActiveAuth(allocator, codex_home, reg);
+        tryEnsureDualProviderHistory(allocator, codex_home);
+        return changed;
     }
 
     const auth_path = try activeAuthPath(allocator, codex_home);
     defer allocator.free(auth_path);
 
     const auth_bytes_opt = try readFileIfExists(allocator, auth_path);
-    if (auth_bytes_opt == null) return false;
+    if (auth_bytes_opt == null) {
+        tryEnsureDualProviderHistory(allocator, codex_home);
+        return false;
+    }
     const auth_bytes = auth_bytes_opt.?;
     defer allocator.free(auth_bytes);
 
@@ -1717,6 +1723,7 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
         error.OutOfMemory => return err,
         else => {
             std.log.warn("auth.json sync skipped: {s}", .{@errorName(err)});
+            tryEnsureDualProviderHistory(allocator, codex_home);
             return false;
         },
     };
@@ -1724,10 +1731,12 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
 
     const email = info.email orelse {
         std.log.warn("auth.json missing email; skipping sync", .{});
+        tryEnsureDualProviderHistory(allocator, codex_home);
         return false;
     };
     const record_key = info.record_key orelse {
         std.log.warn("auth.json missing record_key; skipping sync", .{});
+        tryEnsureDualProviderHistory(allocator, codex_home);
         return false;
     };
 
@@ -1745,6 +1754,7 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
         try upsertAccount(allocator, reg, record);
         record_owned = false;
         try setActiveAccountKey(allocator, reg, record_key);
+        tryEnsureDualProviderHistory(allocator, codex_home);
         return true;
     }
 
@@ -1780,6 +1790,7 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
     }
 
     try setActiveAccountKey(allocator, reg, rec_account_key);
+    tryEnsureDualProviderHistory(allocator, codex_home);
     return changed;
 }
 
@@ -2015,6 +2026,7 @@ pub fn activateAccountByKey(
     try backupAuthIfChanged(allocator, codex_home, dest, src);
     try copyFile(src, dest);
     try setActiveAccountKey(allocator, reg, account_key);
+    tryEnsureDualProviderHistory(allocator, codex_home);
 }
 
 pub fn replaceActiveAuthWithAccountByKey(
@@ -2032,6 +2044,13 @@ pub fn replaceActiveAuthWithAccountByKey(
 
     try copyFile(src, dest);
     try setActiveAccountKey(allocator, reg, account_key);
+    tryEnsureDualProviderHistory(allocator, codex_home);
+}
+
+fn tryEnsureDualProviderHistory(allocator: std.mem.Allocator, codex_home: []const u8) void {
+    _ = history_sync.ensureDualProviderHistory(allocator, codex_home) catch |err| {
+        std.log.warn("history sync skipped: {s}", .{@errorName(err)});
+    };
 }
 
 pub fn accountFromAuth(

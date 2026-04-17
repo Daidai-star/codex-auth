@@ -170,6 +170,26 @@ final class CodexAuthMenuTests: XCTestCase {
         _ = try client.loadState(refreshScope: .none)
     }
 
+    func testCLIClientSyncHistoryParsesMirroredThreadCount() throws {
+        let client = CLIClient(
+            executablePath: "/mock/codex-auth",
+            preferredPath: nil,
+            environment: [:],
+            commandRunner: { _, args, _ in
+                XCTAssertEqual(args, ["sync-history"])
+                return CommandResult(
+                    stdout: Data("history sync complete: mirrored_threads=3\n".utf8),
+                    stderr: Data(),
+                    status: 0
+                )
+            },
+            shellResolver: { _, _ in nil }
+        )
+
+        let summary = try client.syncHistory()
+        XCTAssertEqual(summary.mirroredThreads, 3)
+    }
+
     func testAccountUsageAndRenewalCopyUsesFriendlyText() {
         let usageAccount = Account(
             accountKey: "acct-error",
@@ -314,7 +334,7 @@ final class CodexAuthMenuTests: XCTestCase {
         )
     }
 
-    func testLocalWebServerAPIConfigRefreshAllAndManualRenewalEndpoints() async throws {
+    func testLocalWebServerAPIConfigRefreshAllManualRenewalAndHistorySyncEndpoints() async throws {
         let tempRoot = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
@@ -357,6 +377,18 @@ final class CodexAuthMenuTests: XCTestCase {
         let refreshedState = try JSONDecoder().decode(CodexState.self, from: refreshAll.body)
         XCTAssertEqual(refreshedState.refresh.attempted, 2)
         XCTAssertEqual(refreshedState.refresh.updated, 2)
+
+        let historySync = try await request(
+            baseURL: controlURL,
+            path: "/api/sync-history",
+            token: token,
+            method: "POST"
+        )
+        XCTAssertEqual(historySync.statusCode, 200)
+        let historyPayload = try JSONDecoder().decode(HistorySyncPayload.self, from: historySync.body)
+        XCTAssertTrue(historyPayload.ok)
+        XCTAssertEqual(historyPayload.mirroredThreads, 2)
+        XCTAssertTrue(historyPayload.message.contains("新增 2 个镜像会话"))
 
         let setRenewal = try await request(
             baseURL: controlURL,
@@ -685,6 +717,7 @@ private final class AdvancedMockCLI: @unchecked Sendable {
     private let lock = NSLock()
     private var apiUsageEnabled = false
     private var primaryRenewalDate: String? = "2026-05-01"
+    private var mirroredThreads = 2
 
     func run(_ executablePath: String, _ args: [String], _ environment: [String: String]) throws -> CommandResult {
         lock.lock()
@@ -708,6 +741,10 @@ private final class AdvancedMockCLI: @unchecked Sendable {
         if args == ["config", "api", "disable"] {
             apiUsageEnabled = false
             return CommandResult(stdout: Data(), stderr: Data(), status: 0)
+        }
+        if args == ["sync-history"] {
+            let stdout = "history sync complete: mirrored_threads=\(mirroredThreads)\n"
+            return CommandResult(stdout: Data(stdout.utf8), stderr: Data(), status: 0)
         }
         if args == ["renewal", "set", "--account-key", "acct-primary", "--date", "2026-06-15", "--json"] {
             primaryRenewalDate = "2026-06-15"
@@ -864,6 +901,18 @@ private struct PreferencesPayload: Decodable {
 private struct ActionPayload: Decodable {
     var ok: Bool
     var message: String
+}
+
+private struct HistorySyncPayload: Decodable {
+    var ok: Bool
+    var mirroredThreads: Int
+    var message: String
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case mirroredThreads = "mirrored_threads"
+        case message
+    }
 }
 
 private struct HTTPResponse {

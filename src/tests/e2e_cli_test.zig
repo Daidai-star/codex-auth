@@ -1229,6 +1229,110 @@ test "Scenario: Given default api usage when rendering help then the api enable 
     try std.testing.expectEqualStrings("", result.stderr);
 }
 
+test "Scenario: Given custom-only history when running sync-history then the mirrored openai thread is created" {
+    const gpa = std.testing.allocator;
+    const project_root = try projectRootAlloc(gpa);
+    defer gpa.free(project_root);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(home_root);
+
+    const codex_home = try codexHomeAlloc(gpa, home_root);
+    defer gpa.free(codex_home);
+    try tmp.dir.makePath(".codex/sessions/2026/04/18");
+
+    const rollout_path = try std.fs.path.join(gpa, &[_][]const u8{ codex_home, "sessions", "2026", "04", "18", "CUSTOM-THREAD.jsonl" });
+    defer gpa.free(rollout_path);
+    try std.fs.cwd().writeFile(.{
+        .sub_path = rollout_path,
+        .data =
+            "{\"event\":\"session_meta\",\"payload\":{\"id\":\"CUSTOM-THREAD\",\"model_provider\":\"custom\",\"title\":\"Shared thread\"}}\n" ++
+            "{\"event\":\"user\",\"payload\":{\"text\":\"hello\"}}\n",
+    });
+
+    const db_path = try std.fs.path.join(gpa, &[_][]const u8{ codex_home, "state_5.sqlite" });
+    defer gpa.free(db_path);
+    const setup_sql = try std.fmt.allocPrint(
+        gpa,
+        \\CREATE TABLE threads (
+        \\  id TEXT PRIMARY KEY,
+        \\  rollout_path TEXT NOT NULL,
+        \\  created_at INTEGER,
+        \\  updated_at INTEGER,
+        \\  source TEXT,
+        \\  model_provider TEXT,
+        \\  cwd TEXT,
+        \\  title TEXT,
+        \\  sandbox_policy TEXT,
+        \\  approval_mode TEXT,
+        \\  tokens_used INTEGER,
+        \\  has_user_event INTEGER,
+        \\  archived INTEGER,
+        \\  archived_at INTEGER,
+        \\  git_sha TEXT,
+        \\  git_branch TEXT,
+        \\  git_origin_url TEXT,
+        \\  cli_version TEXT,
+        \\  first_user_message TEXT,
+        \\  agent_nickname TEXT,
+        \\  agent_role TEXT,
+        \\  memory_mode TEXT,
+        \\  model TEXT,
+        \\  reasoning_effort TEXT,
+        \\  agent_path TEXT,
+        \\  created_at_ms INTEGER,
+        \\  updated_at_ms INTEGER
+        \\);
+        \\
+        \\INSERT INTO threads (
+        \\  id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+        \\  sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at,
+        \\  git_sha, git_branch, git_origin_url, cli_version, first_user_message, agent_nickname,
+        \\  agent_role, memory_mode, model, reasoning_effort, agent_path, created_at_ms, updated_at_ms
+        \\) VALUES (
+        \\  'CUSTOM-THREAD', '{s}', 1710000000, 1710000000, 'cli', 'custom', '/tmp/demo',
+        \\  'Shared thread', 'workspace-write', 'never', 0, 1, 0, NULL, NULL, NULL, NULL,
+        \\  '0.0.0', 'hello', NULL, NULL, NULL, 'gpt-5', 'medium', NULL, 1710000000123, 1710000000456
+        \\);
+    ,
+        .{rollout_path},
+    );
+    defer gpa.free(setup_sql);
+    const setup = try std.process.Child.run(.{
+        .allocator = gpa,
+        .argv = &[_][]const u8{ "sqlite3", "-batch", "-noheader", db_path, setup_sql },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer gpa.free(setup.stdout);
+    defer gpa.free(setup.stderr);
+    try expectSuccess(setup);
+
+    const result = try runCliWithIsolatedHome(gpa, project_root, home_root, &[_][]const u8{"sync-history"});
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try expectSuccess(result);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "history sync complete: mirrored_threads=1") != null);
+
+    const verify = try std.process.Child.run(.{
+        .allocator = gpa,
+        .argv = &[_][]const u8{
+            "sqlite3",
+            "-batch",
+            "-noheader",
+            db_path,
+            "SELECT model_provider || '|' || COUNT(*) FROM threads GROUP BY model_provider ORDER BY model_provider;",
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer gpa.free(verify.stdout);
+    defer gpa.free(verify.stderr);
+    try expectSuccess(verify);
+    try std.testing.expectEqualStrings("custom|1\nopenai|1\n", verify.stdout);
+}
+
 test "Scenario: Given remove query with one match when running remove then it deletes immediately and prints a summary" {
     const gpa = std.testing.allocator;
     const project_root = try projectRootAlloc(gpa);

@@ -326,6 +326,8 @@ test "Scenario: Given help when rendering then login and command help notes are 
     try std.testing.expect(std.mem.indexOf(u8, help, "clean") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "remove [<query>|--all]") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Delete backup and stale files under accounts/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "sync-history") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Mirror local history across account and API providers") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "status") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "config") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "auto enable") != null);
@@ -732,6 +734,21 @@ test "Scenario: Given clean when parsing then clean command is preserved" {
     switch (result) {
         .command => |cmd| switch (cmd) {
             .clean => {},
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given sync-history when parsing then sync-history command is preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "sync-history" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .sync_history => {},
             else => return error.TestExpectedEqual,
         },
         else => return error.TestExpectedEqual,
