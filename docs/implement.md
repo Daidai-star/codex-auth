@@ -28,6 +28,7 @@ This document describes how `codex-auth` stores accounts, synchronizes auth file
 - The project keeps using Zig native tests rooted at `src/main.zig`.
 - The current `zig build test` step compiles the test binary but does not execute it.
 - To run the tests locally, use `zig test src/main.zig -lc`.
+- On macOS environments where Zig `0.15.1` fails before entering the project build runner, use `PATH="$PWD/scripts:$PATH" zig build run -- list` or `bash scripts/zig-build-compat.sh run -- list`; use `bash scripts/validate-zig.sh` for isolated validation and `bash scripts/dev-cli.sh -- <args>` for ad hoc direct CLI runs.
 - BDD scenarios are expressed in Zig `test` blocks with descriptive names like:
   - `Scenario: Given ... when ... then ...`
 - Reusable Given/When/Then setup logic should live in test-only helper/context code under `src/tests/` (for example `*_bdd_test.zig` plus helper modules).

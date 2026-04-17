@@ -1,4 +1,5 @@
 const std = @import("std");
+const io_util = @import("io_util.zig");
 
 pub const request_timeout_secs: []const u8 = "5";
 pub const request_timeout_ms: []const u8 = "5000";
@@ -176,7 +177,7 @@ fn reapChildAfterError(child: *std.process.Child) void {
 }
 
 fn resolveNodeExecutable(allocator: std.mem.Allocator) ![]u8 {
-    return std.process.getEnvVarOwned(allocator, node_executable_env) catch |err| switch (err) {
+    return io_util.getEnvVarOwned(allocator, node_executable_env) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => try allocator.dupe(u8, "node"),
         else => return err,
     };
@@ -241,4 +242,3 @@ test "parse node http output keeps timeout marker" {
     try std.testing.expectEqual(@as(?u16, null), parsed.status_code);
     try std.testing.expectEqual(@as(usize, 0), parsed.body.len);
 }
-

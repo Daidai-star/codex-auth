@@ -29,6 +29,7 @@ This document describes the repository's CI, preview package publishing, and tag
 4. Validate the version change before committing.
    - Keep the version values aligned across `src/version.zig`, `package.json`, and the release tag you intend to create.
    - Because `src/version.zig` changes, run `zig build run -- list` before release.
+   - If the local macOS Zig `0.15.1` build runner fails before project code executes, run `PATH="$PWD/scripts:$PATH" zig build run -- list` or `bash scripts/validate-zig.sh` and record that the compatible build path succeeded.
    - Run side-effecting validation from an isolated directory under `/tmp/<task-name>` with `HOME=/tmp/<task-name>`.
 5. Commit and push `main`.
    - Commit with a release message such as `chore: release v0.2.3-alpha.1`.
@@ -62,8 +63,10 @@ This document describes the repository's CI, preview package publishing, and tag
 ## CI Workflow
 
 - Branch and pull request validation runs in `.github/workflows/ci.yml`.
-- The `build-test` matrix runs on `ubuntu-latest`, `macos-latest`, and `windows-latest`.
-- CI installs Zig `0.15.1` and runs `zig test src/main.zig -lc`.
+- The `package-metadata` job checks the root npm package name, `package.json` version, platform optional dependency versions, and `src/version.zig`.
+- The `zig` matrix runs on `ubuntu-latest`, `macos-latest`, and `windows-latest`.
+- CI installs Zig `0.15.1`, prints `zig version` and `zig env`, runs `scripts/test-zig.sh`, builds the native binary, and smoke-runs `codex-auth list` through `scripts/validate-zig.sh`.
+- The `macos-menu-app` job runs on `macos-latest`, executes the Swift test suite, and builds the menu bar app bundle with its bundled CLI.
 
 ## Preview Packages for Pull Requests
 

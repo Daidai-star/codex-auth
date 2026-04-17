@@ -2,8 +2,16 @@ import Foundation
 import Network
 import Security
 
+typealias WebLoginLauncher = @Sendable (_ cliClient: CLIClient, _ deviceAuth: Bool) throws -> Void
+typealias WebImportLauncher = @Sendable (_ cliClient: CLIClient, _ source: CodexImportSource) throws -> TerminalLaunchResult
+typealias WebCodexAppRestarter = @Sendable () -> CodexAppRestartResult
+
 final class LocalWebServer {
     private let cliClient: CLIClient
+    private let userDefaults: UserDefaults
+    private let loginLauncher: WebLoginLauncher
+    private let importLauncher: WebImportLauncher
+    private let codexAppRestarter: WebCodexAppRestarter
     private let queue = DispatchQueue(label: "CodexAuthMenu.LocalWebServer")
     private let token = LocalWebServer.randomToken()
     private let maxRequestBytes = 256 * 1024
@@ -11,9 +19,26 @@ final class LocalWebServer {
     private var port: UInt16?
 
     var onStateChanged: (() -> Void)?
+    var onPreferencesChanged: (() -> Void)?
 
-    init(cliClient: CLIClient) {
+    init(
+        cliClient: CLIClient,
+        userDefaults: UserDefaults = .standard,
+        loginLauncher: @escaping WebLoginLauncher = { client, deviceAuth in
+            try client.openLoginInTerminal(deviceAuth: deviceAuth)
+        },
+        importLauncher: @escaping WebImportLauncher = { client, source in
+            try client.openImportInTerminal(source: source)
+        },
+        codexAppRestarter: @escaping WebCodexAppRestarter = {
+            CodexDesktopController.restartRunningCodexApp()
+        }
+    ) {
         self.cliClient = cliClient
+        self.userDefaults = userDefaults
+        self.loginLauncher = loginLauncher
+        self.importLauncher = importLauncher
+        self.codexAppRestarter = codexAppRestarter
     }
 
     var controlURL: URL? {
@@ -91,6 +116,11 @@ final class LocalWebServer {
     }
 
     private func route(_ request: HTTPRequest, on connection: NWConnection) {
+        if request.method == "GET", request.path == "/favicon.ico" {
+            sendIcon(on: connection)
+            return
+        }
+
         guard isAuthorized(request) else {
             sendError(status: 403, message: "未授权", on: connection)
             return
@@ -101,12 +131,7 @@ final class LocalWebServer {
             case ("GET", "/"):
                 send(status: 200, contentType: "text/html; charset=utf-8", body: WebControlPage.html, on: connection)
             case ("GET", "/app-icon.png"):
-                if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-                   let body = try? Data(contentsOf: iconURL) {
-                    send(status: 200, contentType: "image/png", body: body, on: connection)
-                } else {
-                    sendError(status: 404, message: "未找到图标", on: connection)
-                }
+                sendIcon(on: connection)
             case ("GET", "/api/health"):
                 let health = HealthResponse(
                     ok: true,
@@ -115,20 +140,63 @@ final class LocalWebServer {
                 )
                 let body = try jsonData(health)
                 send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("GET", "/api/preferences"):
+                let body = try jsonData(PreferencesResponse(
+                    restartCodexAfterSwitch: CodexMenuPreferences.restartCodexAfterSwitch(userDefaults: userDefaults)
+                ))
+                send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("GET", "/api/state"):
-                let state = try cliClient.loadState(refreshUsage: false)
+                let state = try cliClient.loadState(refreshScope: .none)
                 let body = try jsonData(state)
                 send(status: 200, contentType: "application/json", body: body, on: connection)
-            case ("POST", "/api/refresh"):
-                let state = try cliClient.loadState(refreshUsage: true)
+            case ("POST", "/api/refresh-active"):
+                let state = try cliClient.loadState(refreshScope: .activeOnly)
                 let body = try jsonData(state)
+                send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("POST", "/api/login"):
+                let request = try JSONDecoder().decode(LoginRequest.self, from: request.body)
+                try loginLauncher(cliClient, request.deviceAuth)
+                let body = try jsonData(ActionResponse(
+                    ok: true,
+                    message: CodexDesktopController.loginStatusMessage(deviceAuth: request.deviceAuth)
+                ))
+                send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("POST", "/api/import"):
+                let request = try JSONDecoder().decode(ImportRequest.self, from: request.body)
+                let result = try importLauncher(cliClient, request.source)
+                let body = try jsonData(ActionResponse(
+                    ok: result == .launched,
+                    message: result == .launched
+                        ? CodexDesktopController.importStatusMessage(source: request.source)
+                        : CodexDesktopController.importCancelledMessage(source: request.source)
+                ))
+                send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("POST", "/api/preferences"):
+                let request = try JSONDecoder().decode(PreferencesRequest.self, from: request.body)
+                CodexMenuPreferences.setRestartCodexAfterSwitch(
+                    request.restartCodexAfterSwitch,
+                    userDefaults: userDefaults
+                )
+                onPreferencesChanged?()
+                let body = try jsonData(PreferencesResponse(
+                    restartCodexAfterSwitch: request.restartCodexAfterSwitch
+                ))
                 send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("POST", "/api/switch"):
                 let body = try JSONDecoder().decode(SwitchRequest.self, from: request.body)
                 let state = try cliClient.switchAccount(accountKey: body.accountKey)
+                let restartResult = CodexMenuPreferences.restartCodexAfterSwitch(userDefaults: userDefaults)
+                    ? codexAppRestarter()
+                    : .disabled
                 onStateChanged?()
                 let response = try jsonData(state)
-                send(status: 200, contentType: "application/json", body: response, on: connection)
+                send(
+                    status: 200,
+                    contentType: "application/json",
+                    body: response,
+                    headers: ["X-Codex-Restart-Result": restartResult.rawValue],
+                    on: connection
+                )
             default:
                 sendError(status: 404, message: "未找到", on: connection)
             }
@@ -153,6 +221,15 @@ final class LocalWebServer {
         return try encoder.encode(value)
     }
 
+    private func sendIcon(on connection: NWConnection) {
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
+           let body = try? Data(contentsOf: iconURL) {
+            send(status: 200, contentType: "image/png", body: body, on: connection)
+        } else {
+            sendError(status: 404, message: "未找到图标", on: connection)
+        }
+    }
+
     private func sendError(status: Int, message: String, on connection: NWConnection) {
         if let body = try? jsonData(ErrorResponse(error: message)) {
             send(status: status, contentType: "application/json; charset=utf-8", body: body, on: connection)
@@ -165,7 +242,13 @@ final class LocalWebServer {
         send(status: status, contentType: contentType, body: Data(body.utf8), on: connection)
     }
 
-    private func send(status: Int, contentType: String, body: Data, on connection: NWConnection) {
+    private func send(
+        status: Int,
+        contentType: String,
+        body: Data,
+        headers: [String: String] = [:],
+        on connection: NWConnection
+    ) {
         let reason: String
         switch status {
         case 200: reason = "OK"
@@ -179,6 +262,9 @@ final class LocalWebServer {
         header += "Content-Type: \(contentType)\r\n"
         header += "Cache-Control: no-store\r\n"
         header += "Content-Length: \(body.count)\r\n"
+        for (name, value) in headers.sorted(by: { $0.key < $1.key }) {
+            header += "\(name): \(value)\r\n"
+        }
         header += "Connection: close\r\n"
         header += "\r\n"
 
@@ -282,6 +368,34 @@ private struct SwitchRequest: Codable {
     }
 }
 
+private struct LoginRequest: Codable {
+    var deviceAuth: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case deviceAuth = "device_auth"
+    }
+}
+
+private struct ImportRequest: Codable {
+    var source: CodexImportSource
+}
+
+private struct PreferencesRequest: Codable {
+    var restartCodexAfterSwitch: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case restartCodexAfterSwitch = "restart_codex_after_switch"
+    }
+}
+
+private struct PreferencesResponse: Codable {
+    var restartCodexAfterSwitch: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case restartCodexAfterSwitch = "restart_codex_after_switch"
+    }
+}
+
 private struct HealthResponse: Codable {
     var ok: Bool
     var cliPath: String
@@ -296,4 +410,9 @@ private struct HealthResponse: Codable {
 
 private struct ErrorResponse: Codable {
     var error: String
+}
+
+private struct ActionResponse: Codable {
+    var ok: Bool
+    var message: String
 }

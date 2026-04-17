@@ -65,6 +65,30 @@ bash apps/macos/CodexAuthMenu/Scripts/build-app.sh
 open apps/macos/CodexAuthMenu/build/CodexAuthMenu.app
 ```
 
+## Local Development
+
+On some macOS setups with Zig `0.15.1`, the native build runner can pick the host `macos 26.x` target and fail with unresolved system symbols before project code runs.
+
+This repository includes a compatible build wrapper. It keeps Zig `0.15.1`, prebuilds the build runner with a stable macOS target, and injects `-Dtarget=<arch>-macos` when needed:
+
+```shell
+PATH="$PWD/scripts:$PATH" zig build run -- list
+bash scripts/zig-build-compat.sh run -- list
+bash scripts/validate-zig.sh
+bash scripts/dev-cli.sh -- list
+bash scripts/dev-cli.sh -- help
+```
+
+You can also use the npm shortcuts:
+
+```shell
+npm run validate:zig
+npm run zig:build -- run -- list
+npm run dev:cli -- list
+```
+
+`scripts/validate-zig.sh` keeps validation isolated under `/tmp/codex-auth-validate` and runs the compatible `zig build run -- list` path on affected macOS environments.
+
 ## Storage Root
 
 `codex-auth` uses the same Codex state root as the current process. Resolution order:

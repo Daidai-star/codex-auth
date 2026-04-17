@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const account_api = @import("account_api.zig");
+const io_util = @import("io_util.zig");
 const c_time = @cImport({
     @cInclude("time.h");
 });
@@ -267,7 +268,7 @@ fn replaceOptionalStringAlloc(
 }
 
 fn getNonEmptyEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
-    const val = std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+    const val = io_util.getEnvVarOwned(allocator, name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
         else => return err,
     };
@@ -535,13 +536,10 @@ fn makeBackupPath(allocator: std.mem.Allocator, dir: []const u8, base_name: []co
         const path = try std.fs.path.join(allocator, &[_][]const u8{ dir, name });
         allocator.free(name);
 
-        if (std.fs.cwd().openFile(path, .{})) |file| {
-            file.close();
-            allocator.free(path);
-            continue;
-        } else |_| {
-            return path;
-        }
+        var file = std.fs.cwd().openFile(path, .{}) catch return path;
+        file.close();
+        allocator.free(path);
+        continue;
     }
 }
 
@@ -703,11 +701,8 @@ pub fn backupAuthIfChanged(
     try ensureDir(dir);
 
     if (!(try filesEqual(allocator, current_auth_path, new_auth_path))) {
-        if (std.fs.cwd().openFile(current_auth_path, .{})) |file| {
-            file.close();
-        } else |_| {
-            return;
-        }
+        var file = std.fs.cwd().openFile(current_auth_path, .{}) catch return;
+        file.close();
         const backup = try makeBackupPath(allocator, dir, "auth.json");
         defer allocator.free(backup);
         try std.fs.cwd().copyFile(current_auth_path, std.fs.cwd(), backup, .{});
@@ -729,11 +724,8 @@ fn backupRegistryIfChanged(
         return;
     }
 
-    if (std.fs.cwd().openFile(current_registry_path, .{})) |file| {
-        file.close();
-    } else |_| {
-        return;
-    }
+    var file = std.fs.cwd().openFile(current_registry_path, .{}) catch return;
+    file.close();
 
     const backup = try makeBackupPath(allocator, dir, "registry.json");
     defer allocator.free(backup);
@@ -1530,11 +1522,8 @@ fn syncCurrentAuthBestEffort(
     const auth_path = try activeAuthPath(allocator, codex_home);
     defer allocator.free(auth_path);
 
-    if (std.fs.cwd().openFile(auth_path, .{})) |file| {
-        file.close();
-    } else |_| {
-        return null;
-    }
+    var file = std.fs.cwd().openFile(auth_path, .{}) catch return null;
+    file.close();
 
     const info = @import("auth.zig").parseAuthInfo(allocator, auth_path) catch return null;
     defer info.deinit(allocator);
@@ -2186,11 +2175,13 @@ fn resolveLegacySnapshotPathForEmail(
     email: []const u8,
 ) ![]u8 {
     const legacy_path = try legacyAccountAuthPath(allocator, codex_home, email);
-    if (std.fs.cwd().openFile(legacy_path, .{})) |file| {
+    legacy_check: {
+        var file = std.fs.cwd().openFile(legacy_path, .{}) catch {
+            allocator.free(legacy_path);
+            break :legacy_check;
+        };
         file.close();
         return legacy_path;
-    } else |_| {
-        allocator.free(legacy_path);
     }
 
     const accounts_dir = try backupDir(allocator, codex_home);
@@ -2770,11 +2761,8 @@ pub fn autoImportActiveAuth(allocator: std.mem.Allocator, codex_home: []const u8
     const auth_path = try activeAuthPath(allocator, codex_home);
     defer allocator.free(auth_path);
 
-    if (std.fs.cwd().openFile(auth_path, .{})) |file| {
-        file.close();
-    } else |_| {
-        return false;
-    }
+    var file = std.fs.cwd().openFile(auth_path, .{}) catch return false;
+    file.close();
 
     const info = try @import("auth.zig").parseAuthInfo(allocator, auth_path);
     defer info.deinit(allocator);

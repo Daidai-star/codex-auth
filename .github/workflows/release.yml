@@ -27,12 +27,15 @@ jobs:
           version: 0.15.1
 
       - name: Zig test
+        shell: bash
         run: |
           zig version
-          zig test src/main.zig -lc
+          zig env
+          bash scripts/test-zig.sh
 
       - name: Build native binary
-        run: zig build -Doptimize=ReleaseSafe
+        shell: bash
+        run: PATH="$PWD/scripts:$PATH" zig build -Doptimize=ReleaseSafe
 
   release-assets:
     name: Build Release Assets (${{ matrix.id }})

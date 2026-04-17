@@ -4,16 +4,35 @@ on:
   push:
     branches:
       - "main"
+      - "codex/**"
   pull_request:
     branches:
       - "main"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build-test:
-    name: Build & Test (${{ matrix.os }})
+  package-metadata:
+    name: Package Metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Check package versions
+        run: npm run check:versions
+
+  zig:
+    name: Zig (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,7 +48,48 @@ jobs:
         with:
           version: 0.15.1
 
-      - name: Zig test
+      - name: Zig toolchain info
+        shell: bash
         run: |
-          zig version
-          zig test src/main.zig -lc
+          PATH="$PWD/scripts:$PATH" zig version
+          PATH="$PWD/scripts:$PATH" zig env
+
+      - name: Zig test
+        shell: bash
+        run: npm run test:zig
+
+      - name: Build native binary
+        shell: bash
+        run: PATH="$PWD/scripts:$PATH" zig build -Doptimize=ReleaseSafe
+
+      - name: Smoke run list command
+        shell: bash
+        run: |
+          PATH="$PWD/scripts:$PATH" TASK_ROOT="$RUNNER_TEMP/codex-auth-ci" bash scripts/validate-zig.sh list
+
+  macos-menu-app:
+    name: macOS Menu App
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Swift test
+        run: |
+          HOME="$RUNNER_TEMP/codex-auth-menu-swift" \
+            swift test \
+              --package-path apps/macos/CodexAuthMenu \
+              --scratch-path "$RUNNER_TEMP/codex-auth-menu-swift-build"
+
+      - name: Build app bundle
+        run: |
+          HOME="$RUNNER_TEMP/codex-auth-menu-bundle" \
+          SCRATCH_PATH="$RUNNER_TEMP/codex-auth-menu-bundle-swift-build" \
+          BUILD_DIR="$RUNNER_TEMP/codex-auth-menu-bundle" \
+            bash apps/macos/CodexAuthMenu/Scripts/build-app.sh

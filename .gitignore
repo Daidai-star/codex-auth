@@ -3,6 +3,8 @@ zig-out/
 .zig-cache/
 dist/
 *.tgz
+.playwright-cli/
+output/
 apps/macos/CodexAuthMenu/build/
 apps/macos/CodexAuthMenu/Resources/AppIcon.iconset/
 

@@ -43,10 +43,12 @@ struct CLIClient: Sendable {
     let executablePath: String?
     private let commandRunner: CLICommandRunner
     private let codexEnvironment: [String: String]
+    private let shellEnvironment: [String: String]
 
     init(
         executablePath: String? = nil,
-        preferredPath: String? = UserDefaults.standard.string(forKey: "codexAuthCLIPath"),
+        preferredPath: String? = nil,
+        bundledPath: String? = CLIClient.bundledExecutablePath(),
         environment: [String: String] = ProcessInfo.processInfo.environment,
         commandRunner: @escaping CLICommandRunner = { executablePath, args, environment in
             try CLIClient.runExecutable(executablePath, args: args, environment: environment)
@@ -57,10 +59,12 @@ struct CLIClient: Sendable {
         }
     ) {
         let resolvedShellEnvironment = CLIClient.makeShellEnvironment(from: environment)
+        shellEnvironment = resolvedShellEnvironment
         codexEnvironment = CLIClient.makeCodexEnvironment(from: resolvedShellEnvironment)
         self.commandRunner = commandRunner
         self.executablePath = executablePath ?? CLIClient.resolveExecutablePath(
             preferredPath: preferredPath,
+            bundledPath: bundledPath,
             environment: resolvedShellEnvironment,
             isExecutable: isExecutable,
             shellResolver: shellResolver
@@ -71,13 +75,13 @@ struct CLIClient: Sendable {
         executablePath ?? "未找到"
     }
 
-    func loadState(refreshUsage: Bool) throws -> CodexState {
-        var args = ["list", "--json"]
-        if refreshUsage {
-            args.append("--refresh-usage")
+    func loadState(refreshScope: UsageRefreshScope) throws -> CodexState {
+        switch refreshScope {
+        case .none:
+            return try loadState(args: ["list", "--json"])
+        case .activeOnly:
+            return try loadStateRefreshingActiveAccount()
         }
-        let result = try run(args)
-        return try decodeState(result.stdout)
     }
 
     func switchAccount(accountKey: String) throws -> CodexState {
@@ -90,6 +94,43 @@ struct CLIClient: Sendable {
             return "不可用"
         }
         return result.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func openLoginInTerminal(deviceAuth: Bool) throws {
+        guard let executablePath else {
+            throw CLIClientError.missingCLI
+        }
+        let command = Self.loginShellCommand(
+            executablePath: executablePath,
+            environment: shellEnvironment,
+            deviceAuth: deviceAuth
+        )
+        try CodexDesktopController.launchLoginInTerminal(shellCommand: command)
+    }
+
+    func openImportInTerminal(source: CodexImportSource) throws -> TerminalLaunchResult {
+        guard let executablePath else {
+            throw CLIClientError.missingCLI
+        }
+
+        let selectedPath: String?
+        if source.requiresPathSelection {
+            guard let selectedURL = CodexDesktopController.chooseImportURL(for: source) else {
+                return .cancelled
+            }
+            selectedPath = selectedURL.path
+        } else {
+            selectedPath = nil
+        }
+
+        let command = Self.importShellCommand(
+            executablePath: executablePath,
+            environment: shellEnvironment,
+            source: source,
+            selectedPath: selectedPath
+        )
+        try CodexDesktopController.launchLoginInTerminal(shellCommand: command)
+        return .launched
     }
 
     func run(_ args: [String]) throws -> CommandResult {
@@ -113,8 +154,26 @@ struct CLIClient: Sendable {
         }
     }
 
+    private func loadState(args: [String]) throws -> CodexState {
+        let result = try run(args)
+        return try decodeState(result.stdout)
+    }
+
+    private func loadStateRefreshingActiveAccount() throws -> CodexState {
+        do {
+            return try loadState(args: ["list", "--json", "--refresh-active-usage"])
+        } catch CLIClientError.failed(_, let stderr) where Self.isUnknownRefreshActiveFlagError(stderr) {
+            let state = try loadState(args: ["list", "--json"])
+            if state.api.usage {
+                throw CLIClientError.invalidOutput("当前 codex-auth 版本不支持“刷新当前账号额度”。请重新打开最新版 Codex 账号，或升级 codex-auth 后重试。")
+            }
+            return try loadState(args: ["list", "--json", "--refresh-usage"])
+        }
+    }
+
     static func resolveExecutablePath(
         preferredPath: String?,
+        bundledPath: String? = nil,
         environment: [String: String],
         isExecutable: @escaping CLIExecutableChecker = { FileManager.default.isExecutableFile(atPath: $0) },
         shellResolver: @escaping CLIShellResolver = { environment in
@@ -130,6 +189,7 @@ struct CLIClient: Sendable {
             candidates.append(path)
         }
 
+        appendCandidate(bundledPath)
         appendCandidate(preferredPath)
         appendCandidate(environment["CODEX_AUTH_CLI_PATH"])
         if let nvmBin = environment["NVM_BIN"], !nvmBin.isEmpty {
@@ -145,6 +205,22 @@ struct CLIClient: Sendable {
 
         if let path = shellResolver(environment), isExecutable(path) {
             return path
+        }
+
+        return nil
+    }
+
+    private static func bundledExecutablePath(bundle: Bundle = .main) -> String? {
+        let candidates = [
+            bundle.resourceURL?.appendingPathComponent("codex-auth").path,
+            bundle.resourceURL?.appendingPathComponent("bin/codex-auth").path,
+        ]
+
+        for candidate in candidates {
+            guard let candidate else { continue }
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
         }
 
         return nil
@@ -199,6 +275,57 @@ struct CLIClient: Sendable {
         return env
     }
 
+    private static func loginShellCommand(
+        executablePath: String,
+        environment: [String: String],
+        deviceAuth: Bool
+    ) -> String {
+        let exportedKeys = ["PATH", "HOME", "USERPROFILE", "CODEX_HOME"]
+        let exports = exportedKeys.compactMap { key -> String? in
+            guard let value = environment[key], !value.isEmpty else { return nil }
+            return "export \(key)=\(shellQuoted(value))"
+        }
+
+        var parts = exports
+        parts.append("\(shellQuoted(executablePath)) login\(deviceAuth ? " --device-auth" : "")")
+        parts.append("status=$?")
+        parts.append("echo")
+        parts.append("if [ $status -eq 0 ]; then echo \(shellQuoted("登录流程已结束，回到 Codex 账号 点“重新加载”即可。")); else echo \(shellQuoted("登录流程退出码："))$status; fi")
+        parts.append("echo")
+        parts.append("echo \(shellQuoted("按回车关闭此窗口"))")
+        parts.append("read _")
+        return parts.joined(separator: "; ")
+    }
+
+    private static func importShellCommand(
+        executablePath: String,
+        environment: [String: String],
+        source: CodexImportSource,
+        selectedPath: String?
+    ) -> String {
+        let exportedKeys = ["PATH", "HOME", "USERPROFILE", "CODEX_HOME"]
+        let exports = exportedKeys.compactMap { key -> String? in
+            guard let value = environment[key], !value.isEmpty else { return nil }
+            return "export \(key)=\(shellQuoted(value))"
+        }
+
+        var commandParts = [shellQuoted(executablePath)]
+        commandParts.append(contentsOf: source.shellArguments.map(shellQuoted))
+        if let selectedPath, !selectedPath.isEmpty {
+            commandParts.append(shellQuoted(selectedPath))
+        }
+
+        var parts = exports
+        parts.append(commandParts.joined(separator: " "))
+        parts.append("status=$?")
+        parts.append("echo")
+        parts.append("if [ $status -eq 0 ]; then echo \(shellQuoted("导入流程已结束，回到 Codex 账号 点“重新加载”即可。")); else echo \(shellQuoted("导入流程退出码："))$status; fi")
+        parts.append("echo")
+        parts.append("echo \(shellQuoted("按回车关闭此窗口"))")
+        parts.append("read _")
+        return parts.joined(separator: "; ")
+    }
+
     private static func pathEntries(from rawPath: String?) -> [String] {
         guard let rawPath, !rawPath.isEmpty else { return [] }
         return rawPath
@@ -220,6 +347,17 @@ struct CLIClient: Sendable {
             guard let value else { return false }
             return !value.isEmpty
         } ?? nil
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private static func isUnknownRefreshActiveFlagError(_ stderr: String) -> Bool {
+        let normalized = stderr.lowercased()
+        return normalized.contains("unknown flag `--refresh-active-usage`") ||
+            normalized.contains("unknown flag '--refresh-active-usage'") ||
+            normalized.contains("unexpected argument `--refresh-active-usage`")
     }
 
     private static let defaultPathEntries = [

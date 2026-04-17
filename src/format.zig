@@ -12,10 +12,13 @@ const ansi = struct {
     const reset = "\x1b[0m";
     const dim = "\x1b[2m";
     const green = "\x1b[32m";
+    const bold = "\x1b[1m";
+    const bold_green = "\x1b[1;32m";
+    const cyan = "\x1b[36m";
 };
 
 fn colorEnabled() bool {
-    return std.fs.File.stdout().isTty();
+    return io_util.stdoutIsTty();
 }
 
 fn planDisplay(rec: *const registry.AccountRecord, missing: []const u8) []const u8 {
@@ -92,8 +95,8 @@ fn writeAccountsTableWithUsageOverrides(
     var display = try display_rows.buildDisplayRows(std.heap.page_allocator, reg, null);
     defer display.deinit(std.heap.page_allocator);
     const idx_width = @max(@as(usize, 2), indexWidth(display.selectable_row_indices.len));
-    const prefix_len: usize = 2 + idx_width + 1;
-    const sep_len: usize = 2;
+    const prefix_len: usize = 3 + idx_width + 2;
+    const sep_len: usize = 3;
 
     for (display.rows) |row| {
         const indent: usize = @as(usize, row.depth) * 2;
@@ -118,6 +121,12 @@ fn writeAccountsTableWithUsageOverrides(
         }
     }
 
+    try writeAccountsSummary(out, reg, use_color);
+    if (display.rows.len == 0) {
+        try writeEmptyAccountsState(out, use_color);
+        return;
+    }
+
     adjustListWidths(&widths, prefix_len, sep_len);
 
     const h0 = try truncateAlloc(headers[0], widths[0]);
@@ -134,20 +143,24 @@ fn writeAccountsTableWithUsageOverrides(
     const h4 = try truncateAlloc(header_last, widths[4]);
     defer std.heap.page_allocator.free(h4);
 
-    if (use_color) try out.writeAll(ansi.dim);
+    try out.writeAll("\n");
+
+    if (use_color) try out.writeAll(ansi.bold);
     try writeRepeat(out, ' ', prefix_len);
     try writePadded(out, h0, widths[0]);
-    try out.writeAll("  ");
+    try out.writeAll("   ");
     try writePadded(out, h1, widths[1]);
-    try out.writeAll("  ");
+    try out.writeAll("   ");
     try writePadded(out, h2, widths[2]);
-    try out.writeAll("  ");
+    try out.writeAll("   ");
     try writePadded(out, h3, widths[3]);
-    try out.writeAll("  ");
+    try out.writeAll("   ");
     try writePadded(out, h4, widths[4]);
     try out.writeAll("\n");
+    if (use_color) try out.writeAll(ansi.reset);
+
     if (use_color) try out.writeAll(ansi.dim);
-    try writeRepeat(out, '-', listTotalWidth(&widths, prefix_len, sep_len));
+    try writeRepeatStr(out, "─", listTotalWidth(&widths, prefix_len, sep_len));
     try out.writeAll("\n");
     if (use_color) try out.writeAll(ansi.reset);
 
@@ -179,23 +192,25 @@ fn writeAccountsTableWithUsageOverrides(
             defer std.heap.page_allocator.free(last_cell);
             if (use_color) {
                 if (row.is_active) {
-                    try out.writeAll(ansi.green);
+                    try out.writeAll(ansi.bold_green);
                 } else {
                     try out.writeAll(ansi.dim);
                 }
             }
-            try out.writeAll(if (row.is_active) "* " else "  ");
+            try out.writeAll(if (row.is_active) " ❯ " else "   ");
             try writeIndexPadded(out, selectable_counter + 1, idx_width);
-            try out.writeAll(" ");
+            try out.writeAll("  ");
             try writeRepeat(out, ' ', indent_to_print);
+
+            if (use_color and row.is_active) try out.writeAll(ansi.reset);
             try writePadded(out, account_cell, widths[0] - indent_to_print);
-            try out.writeAll("  ");
+            try out.writeAll("   ");
             try writePadded(out, plan_cell, widths[1]);
-            try out.writeAll("  ");
+            try out.writeAll("   ");
             try writePadded(out, rate_5h_cell, widths[2]);
-            try out.writeAll("  ");
+            try out.writeAll("   ");
             try writePadded(out, rate_week_cell, widths[3]);
-            try out.writeAll("  ");
+            try out.writeAll("   ");
             try writePadded(out, last_cell, widths[4]);
             try out.writeAll("\n");
             if (use_color) try out.writeAll(ansi.reset);
@@ -210,6 +225,42 @@ fn writeAccountsTableWithUsageOverrides(
             if (use_color) try out.writeAll(ansi.reset);
         }
     }
+}
+
+fn writeAccountsSummary(out: *std.Io.Writer, reg: *const registry.Registry, use_color: bool) !void {
+    try out.writeAll("\n");
+    if (use_color) try out.writeAll(ansi.dim);
+    try out.print(
+        " Saved accounts: {d}   Active: {s}   Usage source: {s}\n",
+        .{
+            reg.accounts.items.len,
+            activeAccountDisplay(reg),
+            if (reg.api.usage) "api" else "local",
+        },
+    );
+    if (use_color) try out.writeAll(ansi.reset);
+}
+
+fn writeEmptyAccountsState(out: *std.Io.Writer, use_color: bool) !void {
+    try out.writeAll("\n");
+    if (use_color) try out.writeAll(ansi.bold);
+    try out.writeAll(" No saved accounts yet.\n");
+    if (use_color) try out.writeAll(ansi.reset);
+    if (use_color) try out.writeAll(ansi.dim);
+    try out.writeAll(" Try one of these next:\n");
+    if (use_color) try out.writeAll(ansi.reset);
+    try out.writeAll("   codex-auth login\n");
+    try out.writeAll("   codex-auth login --device-auth\n");
+    try out.writeAll("   codex-auth import /path/to/auth.json --alias personal\n");
+}
+
+fn activeAccountDisplay(reg: *const registry.Registry) []const u8 {
+    const active_key = reg.active_account_key orelse return "none";
+    for (reg.accounts.items) |*rec| {
+        if (!std.mem.eql(u8, rec.account_key, active_key)) continue;
+        return rec.account_name orelse rec.email;
+    }
+    return "none";
 }
 
 fn resolveRateWindow(usage: ?registry.RateLimitSnapshot, minutes: i64, fallback_primary: bool) ?registry.RateLimitWindow {
@@ -469,6 +520,13 @@ fn writeRepeat(out: *std.Io.Writer, ch: u8, count: usize) !void {
     }
 }
 
+fn writeRepeatStr(out: *std.Io.Writer, str: []const u8, count: usize) !void {
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        try out.writeAll(str);
+    }
+}
+
 fn listTotalWidth(widths: *const [5]usize, prefix_len: usize, sep_len: usize) usize {
     var sum: usize = prefix_len;
     for (widths) |w| sum += w;
@@ -591,8 +649,8 @@ fn tableTotalWidth(widths: []const usize) usize {
 }
 
 fn terminalWidth() usize {
-    const stdout_file = std.fs.File.stdout();
-    if (!stdout_file.isTty()) return 0;
+    const stdout_file = io_util.stdoutFile();
+    if (!io_util.stdoutIsTty()) return 0;
 
     if (comptime builtin.os.tag == .windows) {
         var info: std.os.windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
@@ -728,6 +786,7 @@ test "writeAccountsTable shows zero-padded row numbers for selectable accounts" 
     try writeAccountsTable(&writer, &reg, false);
 
     const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Saved accounts: 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "01   Als's Workspace") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "02   Free") != null);
 }
@@ -748,4 +807,18 @@ test "writeAccountsTable shows usage override statuses for failed refreshes" {
 
     const output = writer.buffered();
     try std.testing.expect(std.mem.count(u8, output, "403") >= 2);
+}
+
+test "writeAccountsTable shows helpful empty state when no accounts are saved" {
+    var reg = makeTestRegistry();
+    defer reg.deinit(std.testing.allocator);
+
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeAccountsTable(&writer, &reg, false);
+
+    const output = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Saved accounts: 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "No saved accounts yet.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "codex-auth login --device-auth") != null);
 }

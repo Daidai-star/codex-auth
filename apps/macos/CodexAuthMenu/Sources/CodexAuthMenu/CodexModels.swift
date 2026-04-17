@@ -1,5 +1,19 @@
 import Foundation
 
+enum UsageRefreshScope: Sendable {
+    case none
+    case activeOnly
+
+    var cliFlag: String? {
+        switch self {
+        case .none:
+            return nil
+        case .activeOnly:
+            return "--refresh-active-usage"
+        }
+    }
+}
+
 struct CodexState: Codable, Sendable {
     var schemaVersion: Int
     var codexHome: String
@@ -83,9 +97,9 @@ struct Account: Codable, Identifiable, Sendable {
     }
 
     var usageLine: String {
-        guard let usage else { return "未刷新额度" }
+        guard let usage else { return "本地额度待同步" }
         if usage.status != "ok" {
-            return "额度刷新：\(usage.status)"
+            return "本地额度状态：\(usage.status)"
         }
         let fiveHour = usage.fiveHour?.remainingPercent.map { "\($0)% 5小时" } ?? "-- 5小时"
         let weekly = usage.weekly?.remainingPercent.map { "\($0)% 每周" } ?? "-- 每周"

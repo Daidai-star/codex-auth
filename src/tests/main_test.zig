@@ -395,6 +395,59 @@ test "Scenario: Given foreground usage refresh targets when checking refresh pol
     try std.testing.expect(!main_mod.shouldRefreshForegroundUsage(.remove_account));
 }
 
+test "Scenario: Given active usage json refresh when refreshing only the active account then summary updates one record" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const codex_home = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(codex_home);
+
+    const TestActiveUsageFetcher = struct {
+        fn fetch(allocator: std.mem.Allocator, refresh_codex_home: []const u8) !?registry.RateLimitSnapshot {
+            _ = allocator;
+            _ = refresh_codex_home;
+            return .{
+                .primary = .{
+                    .used_percent = 12.0,
+                    .window_minutes = 300,
+                    .resets_at = 1773491460,
+                },
+                .secondary = .{
+                    .used_percent = 32.0,
+                    .window_minutes = 10080,
+                    .resets_at = 1773749620,
+                },
+                .credits = null,
+                .plan_type = .team,
+            };
+        }
+    };
+
+    var reg = makeRegistry();
+    defer reg.deinit(gpa);
+    try appendAccount(gpa, &reg, primary_record_key, "user@example.com", "", .team);
+    try appendAccount(gpa, &reg, secondary_record_key, "user@example.com", "", .plus);
+    try registry.setActiveAccountKey(gpa, &reg, primary_record_key);
+
+    const summary = try main_mod.refreshActiveUsageForJsonWithApiFetcher(
+        gpa,
+        codex_home,
+        &reg,
+        TestActiveUsageFetcher.fetch,
+    );
+
+    try std.testing.expect(summary.usage_requested);
+    try std.testing.expectEqual(@as(usize, 1), summary.attempted);
+    try std.testing.expectEqual(@as(usize, 1), summary.updated);
+    try std.testing.expectEqual(@as(usize, 0), summary.failed);
+    try std.testing.expectEqual(@as(usize, 0), summary.unchanged);
+    try std.testing.expect(!summary.local_only_mode);
+
+    try std.testing.expectEqual(@as(f64, 12.0), reg.accounts.items[0].last_usage.?.primary.?.used_percent);
+    try std.testing.expect(reg.accounts.items[1].last_usage == null);
+}
+
 test "Scenario: Given api usage refresh for list and switch when refreshing foreground usage then all accounts are updated with status overlays" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
