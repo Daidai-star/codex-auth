@@ -38,6 +38,9 @@ private struct MenuContent: View {
             model.openWebControl()
         }
 
+        Text("已有账号快照可直接导入")
+        Text("首次登录新账号仍需官方 Codex CLI")
+
         Menu("添加账号") {
             Button("账号登录") {
                 model.startLogin(deviceAuth: false)

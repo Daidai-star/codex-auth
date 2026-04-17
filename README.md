@@ -57,12 +57,24 @@ This repository also includes a local macOS menu bar companion app under [`apps/
 - Local web control page served on `127.0.0.1`
 - Manual usage refresh only
 - No direct reads or writes to Codex auth files outside the CLI JSON interface
+- The app bundle includes `codex-auth`, so users do not need a separate `@loongphy/codex-auth` npm install
+
+If you already have account snapshots, `auth.json`, or CPA files, the app can be used directly on its own.
+If you want to add a brand-new account through the login buttons, the official Codex CLI is still required because the login flow delegates to `codex login`.
+
+Release builds can ship the menu bar app as downloadable macOS zip assets on the GitHub Releases page, alongside the CLI archives.
 
 Build it from source with:
 
 ```shell
 bash apps/macos/CodexAuthMenu/Scripts/build-app.sh
 open apps/macos/CodexAuthMenu/build/CodexAuthMenu.app
+```
+
+Package a release-ready zip with:
+
+```shell
+bash apps/macos/CodexAuthMenu/Scripts/package-release-app.sh
 ```
 
 ## Local Development

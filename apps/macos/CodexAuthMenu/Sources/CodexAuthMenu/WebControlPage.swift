@@ -404,6 +404,10 @@ enum WebControlPage {
       overflow-wrap: anywhere;
     }
 
+    .panel-copy + .panel-copy {
+      margin-top: 10px;
+    }
+
     .status-panel {
       display: grid;
       gap: 14px;
@@ -731,6 +735,12 @@ enum WebControlPage {
             </div>
           </div>
           <div class="health-line" id="healthLine">正在读取 Codex CLI 信息</div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">首次使用</h2>
+          <p class="panel-copy">这个 App 已经内置 codex-auth。已有 auth.json、账号快照或 CPA 文件时，可以直接导入开始使用。</p>
+          <p class="panel-copy">如果是第一次登录新账号，机器上仍需要官方 Codex CLI；这里的登录动作会在终端里调用 <code>codex login</code>。</p>
         </section>
 
         <section class="panel">
