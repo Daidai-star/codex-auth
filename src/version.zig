@@ -1,1 +1,1 @@
-pub const app_version = "0.2.4";
+pub const app_version = "1.0.1-alpha.1";

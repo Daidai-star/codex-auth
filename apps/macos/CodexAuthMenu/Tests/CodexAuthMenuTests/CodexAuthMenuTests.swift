@@ -164,7 +164,7 @@ final class CodexAuthMenuTests: XCTestCase {
         let health = try JSONDecoder().decode(HealthPayload.self, from: healthResponse.body)
         XCTAssertTrue(health.ok)
         XCTAssertEqual(health.cliPath, "/mock/codex-auth")
-        XCTAssertEqual(health.version, "codex-auth 0.2.4")
+        XCTAssertEqual(health.version, "codex-auth 1.0.1-alpha.1")
 
         let stateResponse = try await request(
             baseURL: controlURL,
@@ -209,7 +209,7 @@ final class CodexAuthMenuTests: XCTestCase {
 
         let client = makeClient(home: tempRoot) { _, args, _ in
             if args == ["--version"] {
-                return CommandResult(stdout: Data("codex-auth 0.2.4\n".utf8), stderr: Data(), status: 0)
+                return CommandResult(stdout: Data("codex-auth 1.0.1-alpha.1\n".utf8), stderr: Data(), status: 0)
             }
             return CommandResult(stdout: Data(), stderr: Data("boom".utf8), status: 1)
         }
@@ -491,7 +491,7 @@ private final class MockCLI: @unchecked Sendable {
         defer { lock.unlock() }
 
         if args == ["--version"] {
-            return CommandResult(stdout: Data("codex-auth 0.2.4\n".utf8), stderr: Data(), status: 0)
+            return CommandResult(stdout: Data("codex-auth 1.0.1-alpha.1\n".utf8), stderr: Data(), status: 0)
         }
         if args == ["list", "--json"] {
             return state(activeKey: "acct-primary")
