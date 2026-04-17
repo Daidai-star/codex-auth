@@ -66,7 +66,6 @@ private struct MenuHeader: View {
                 Image(systemName: model.isBusy ? "arrow.triangle.2.circlepath" : "person.crop.circle.badge.checkmark")
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                    .symbolEffect(.pulse, options: .repeating, value: model.isBusy)
             }
 
             VStack(alignment: .leading, spacing: 4) {
