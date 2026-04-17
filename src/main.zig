@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const account_api = @import("account_api.zig");
 const account_name_refresh = @import("account_name_refresh.zig");
 const cli = @import("cli.zig");
@@ -14,6 +15,8 @@ const skip_service_reconcile_env = "CODEX_AUTH_SKIP_SERVICE_RECONCILE";
 const account_name_refresh_only_env = "CODEX_AUTH_REFRESH_ACCOUNT_NAMES_ONLY";
 const disable_background_account_name_refresh_env = "CODEX_AUTH_DISABLE_BACKGROUND_ACCOUNT_NAME_REFRESH";
 const foreground_usage_refresh_concurrency: usize = 3;
+const use_process_init_main = builtin.zig_version.major > 0 or
+    (builtin.zig_version.major == 0 and builtin.zig_version.minor >= 16);
 
 const AccountFetchFn = *const fn (
     allocator: std.mem.Allocator,
@@ -299,28 +302,55 @@ const DebugUsageLabelState = struct {
     }
 };
 
-pub fn main() !void {
+pub const main = if (use_process_init_main) mainWithProcessInit else mainLegacy;
+
+fn mainLegacy() !void {
     var exit_code: u8 = 0;
-    runMain() catch |err| {
-        if (err == error.InvalidCliUsage) {
-            exit_code = 2;
-        } else if (isHandledCliError(err)) {
-            exit_code = 1;
-        } else {
-            return err;
-        }
-    };
+
+    {
+        var gpa = std.heap.DebugAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
+
+        const args = try std.process.argsAlloc(allocator);
+        defer std.process.argsFree(allocator, args);
+
+        exit_code = try cliExitCode(runMainArgs(allocator, args));
+    }
+
     if (exit_code != 0) std.process.exit(exit_code);
 }
 
-fn runMain() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+fn mainWithProcessInit(init: std.process.Init) !void {
+    io_util.setRuntimeIo(init.io);
+    io_util.setRuntimeEnvironMap(init.environ_map);
+    var exit_code: u8 = 0;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    {
+        var gpa = std.heap.DebugAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const allocator = gpa.allocator();
 
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const args = try init.minimal.args.toSlice(arena.allocator());
+
+        exit_code = try cliExitCode(runMainArgs(allocator, args));
+    }
+
+    if (exit_code != 0) std.process.exit(exit_code);
+}
+
+fn cliExitCode(result: anyerror!void) !u8 {
+    result catch |err| {
+        if (err == error.InvalidCliUsage) return 2;
+        if (isHandledCliError(err)) return 1;
+        return err;
+    };
+    return 0;
+}
+
+fn runMainArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     var parsed = try cli.parseArgs(allocator, args);
     defer cli.freeParseResult(allocator, &parsed);
 
@@ -357,7 +387,7 @@ fn runMain() !void {
         .import_auth => |opts| try handleImport(allocator, codex_home.?, opts),
         .switch_account => |opts| try handleSwitch(allocator, codex_home.?, opts),
         .remove_account => |opts| try handleRemove(allocator, codex_home.?, opts),
-        .clean => |_| try handleClean(allocator, codex_home.?),
+        .clean => try handleClean(allocator, codex_home.?),
     }
 
     if (shouldReconcileManagedService(cmd)) {
@@ -374,7 +404,7 @@ fn isHandledCliError(err: anyerror) bool {
 }
 
 pub fn shouldReconcileManagedService(cmd: cli.Command) bool {
-    if (std.process.hasNonEmptyEnvVarConstant(skip_service_reconcile_env)) return false;
+    if (io_util.hasNonEmptyEnvVarConstant(skip_service_reconcile_env)) return false;
     return switch (cmd) {
         .help, .version, .status, .daemon => false,
         else => true,
@@ -392,11 +422,11 @@ pub fn shouldRefreshForegroundUsage(target: ForegroundUsageRefreshTarget) bool {
 }
 
 fn isAccountNameRefreshOnlyMode() bool {
-    return std.process.hasNonEmptyEnvVarConstant(account_name_refresh_only_env);
+    return io_util.hasNonEmptyEnvVarConstant(account_name_refresh_only_env);
 }
 
 fn isBackgroundAccountNameRefreshDisabled() bool {
-    return std.process.hasNonEmptyEnvVarConstant(disable_background_account_name_refresh_env);
+    return io_util.hasNonEmptyEnvVarConstant(disable_background_account_name_refresh_env);
 }
 
 fn trackedActiveAccountKey(reg: *registry.Registry) ?[]const u8 {
@@ -490,6 +520,38 @@ fn maybeRefreshForegroundUsage(
     if (try auto.refreshActiveUsage(allocator, codex_home, reg)) {
         try registry.saveRegistry(allocator, codex_home, reg);
     }
+}
+
+fn refreshActiveUsageForJson(allocator: std.mem.Allocator, codex_home: []const u8, reg: *registry.Registry) !JsonRefreshSummary {
+    return refreshActiveUsageForJsonWithApiFetcher(allocator, codex_home, reg, usage_api.fetchActiveUsage);
+}
+
+pub fn refreshActiveUsageForJsonWithApiFetcher(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *registry.Registry,
+    api_fetcher: anytype,
+) !JsonRefreshSummary {
+    const attempted: usize = if (trackedActiveAccountKey(reg) != null) 1 else 0;
+    if (attempted == 0) {
+        return .{
+            .usage_requested = true,
+            .local_only_mode = !reg.api.usage,
+        };
+    }
+
+    const updated = try auto.refreshActiveUsageWithApiFetcher(allocator, codex_home, reg, api_fetcher);
+    if (updated) {
+        try registry.saveRegistry(allocator, codex_home, reg);
+    }
+
+    return .{
+        .usage_requested = true,
+        .attempted = attempted,
+        .updated = if (updated) 1 else 0,
+        .unchanged = if (updated) 0 else attempted,
+        .local_only_mode = !reg.api.usage,
+    };
 }
 
 pub fn refreshForegroundUsageForDisplayWithApiFetcher(
@@ -1149,6 +1211,9 @@ fn handleList(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.Li
                 .unchanged = usage_state.unchanged,
                 .local_only_mode = usage_state.local_only_mode,
             });
+        } else if (opts.refresh_active_usage) {
+            const refresh = try refreshActiveUsageForJson(allocator, codex_home, &reg);
+            try printAccountsJson(allocator, codex_home, &reg, null, refresh);
         } else {
             try printAccountsJson(allocator, codex_home, &reg, null, .{});
         }
@@ -1434,7 +1499,7 @@ fn handleRemove(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.
                 freeOwnedStrings(allocator, matched_labels.items);
                 matched_labels.deinit(allocator);
             }
-            if (!std.fs.File.stdin().isTty()) {
+            if (!io_util.stdinIsTty()) {
                 try cli.printRemoveConfirmationUnavailableError(matched_labels.items);
                 return error.RemoveConfirmationUnavailable;
             }
@@ -1513,7 +1578,7 @@ fn handleTopLevelHelp(allocator: std.mem.Allocator, codex_home: []const u8) !voi
 fn handleClean(allocator: std.mem.Allocator, codex_home: []const u8) !void {
     const summary = try registry.cleanAccountsBackups(allocator, codex_home);
     var stdout: [256]u8 = undefined;
-    var writer = std.fs.File.stdout().writer(&stdout);
+    var writer = io_util.stdoutWriter(&stdout);
     const out = &writer.interface;
     try out.print(
         "cleaned accounts: auth_backups={d}, registry_backups={d}, stale_entries={d}\n",

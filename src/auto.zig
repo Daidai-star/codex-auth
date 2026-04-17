@@ -525,7 +525,7 @@ pub fn helpStateLabel(enabled: bool) []const u8 {
 }
 
 fn colorEnabled() bool {
-    return std.fs.File.stdout().isTty();
+    return io_util.stdoutIsTty();
 }
 
 pub fn printStatus(allocator: std.mem.Allocator, codex_home: []const u8) !void {
@@ -591,7 +591,7 @@ pub fn writeAutoSwitchLogLine(
 
 fn emitAutoSwitchLog(from: *const registry.AccountRecord, to: *const registry.AccountRecord) void {
     var stderr_buffer: [256]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var writer = io_util.stderrWriter(&stderr_buffer);
     writeAutoSwitchLogLine(&writer.interface, from, to) catch {};
 }
 
@@ -606,7 +606,7 @@ const DaemonLogPriority = enum {
 fn emitDaemonLog(priority: DaemonLogPriority, comptime fmt: []const u8, args: anytype) void {
     _ = priority;
     var stderr_buffer: [512]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var writer = io_util.stderrWriter(&stderr_buffer);
     writer.interface.print(fmt ++ "\n", args) catch {};
     writer.interface.flush() catch {};
 }
@@ -619,7 +619,7 @@ fn emitTaggedDaemonLog(
 ) void {
     _ = priority;
     var stderr_buffer: [1024]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var writer = io_util.stderrWriter(&stderr_buffer);
     writer.interface.print("[{s}] ", .{tag}) catch {};
     writer.interface.print(fmt ++ "\n", args) catch {};
     writer.interface.flush() catch {};

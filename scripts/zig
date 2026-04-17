@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+resolve_zig() {
+  if [[ -n "${ZIG_EXECUTABLE:-}" && -x "${ZIG_EXECUTABLE}" && "${ZIG_EXECUTABLE}" != "$SCRIPT_DIR/zig" ]]; then
+    printf '%s\n' "${ZIG_EXECUTABLE}"
+    return
+  fi
+
+  local candidate
+  while IFS= read -r candidate; do
+    if [[ -n "$candidate" && "$candidate" != "$SCRIPT_DIR/zig" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done < <(type -a -p zig 2>/dev/null | awk '!seen[$0]++')
+
+  if [[ -x "/tmp/codex-auth-refresh/zig-0.15.1/zig" ]]; then
+    printf '%s\n' "/tmp/codex-auth-refresh/zig-0.15.1/zig"
+    return
+  fi
+
+  echo "Zig executable not found. Set ZIG_EXECUTABLE or add zig to PATH." >&2
+  exit 1
+}
+
+REAL_ZIG="$(resolve_zig)"
+export ZIG_EXECUTABLE="$REAL_ZIG"
+
+if [[ "${1:-}" == "build" ]]; then
+  shift
+  exec "$SCRIPT_DIR/zig-build-compat.sh" "$@"
+fi
+
+exec "$REAL_ZIG" "$@"

@@ -24,17 +24,18 @@ const ansi = struct {
 };
 
 fn colorEnabled() bool {
-    return std.fs.File.stdout().isTty();
+    return io_util.stdoutIsTty();
 }
 
 fn stderrColorEnabled() bool {
-    return std.fs.File.stderr().isTty();
+    return io_util.stderrIsTty();
 }
 
 pub const ListOptions = struct {
     debug: bool = false,
     json: bool = false,
     refresh_usage: bool = false,
+    refresh_active_usage: bool = false,
 };
 pub const LoginOptions = struct {
     device_auth: bool = false,
@@ -167,6 +168,13 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
                 opts.refresh_usage = true;
                 continue;
             }
+            if (std.mem.eql(u8, arg, "--refresh-active-usage")) {
+                if (opts.refresh_active_usage) {
+                    return usageErrorResult(allocator, .list, "duplicate `--refresh-active-usage` for `list`.", .{});
+                }
+                opts.refresh_active_usage = true;
+                continue;
+            }
             if (isHelpFlag(arg)) {
                 return usageErrorResult(allocator, .list, "`--help` must be used by itself for `list`.", .{});
             }
@@ -175,8 +183,11 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
             }
             return usageErrorResult(allocator, .list, "unexpected argument `{s}` for `list`.", .{arg});
         }
-        if (opts.refresh_usage and !opts.json) {
-            return usageErrorResult(allocator, .list, "`--refresh-usage` requires `--json` for `list`.", .{});
+        if ((opts.refresh_usage or opts.refresh_active_usage) and !opts.json) {
+            return usageErrorResult(allocator, .list, "`--refresh-usage` and `--refresh-active-usage` require `--json` for `list`.", .{});
+        }
+        if (opts.refresh_usage and opts.refresh_active_usage) {
+            return usageErrorResult(allocator, .list, "`list` cannot combine `--refresh-usage` with `--refresh-active-usage`.", .{});
         }
         return .{ .command = .{ .list = opts } };
     }
@@ -571,36 +582,42 @@ pub fn writeHelp(
     if (use_color) try out.writeAll(ansi.dim);
     try out.writeAll(version.app_version);
     if (use_color) try out.writeAll(ansi.reset);
-    try out.writeAll("\n\n");
-
-    if (use_color) try out.writeAll(ansi.bold);
-    try out.writeAll("Auto Switch:");
+    try out.writeAll("\n");
+    if (use_color) try out.writeAll(ansi.dim);
+    try out.writeAll("Command-line account switching for Codex.\n");
     if (use_color) try out.writeAll(ansi.reset);
-    try out.print(
-        " {s} (5h<{d}%, weekly<{d}%)\n\n",
-        .{ if (auto_cfg.enabled) "ON" else "OFF", auto_cfg.threshold_5h_percent, auto_cfg.threshold_weekly_percent },
+
+    const auto_switch_detail = try std.fmt.allocPrint(
+        std.heap.page_allocator,
+        "5h<{d}%, weekly<{d}%",
+        .{ auto_cfg.threshold_5h_percent, auto_cfg.threshold_weekly_percent },
+    );
+    defer std.heap.page_allocator.free(auto_switch_detail);
+
+    try writeHelpSectionTitle(out, use_color, "Runtime");
+    try writeHelpStatusLine(
+        out,
+        use_color,
+        "Auto Switch",
+        if (auto_cfg.enabled) "ON" else "OFF",
+        auto_switch_detail,
+    );
+    try writeHelpStatusLine(
+        out,
+        use_color,
+        "Usage API",
+        if (api_cfg.usage) "ON" else "OFF",
+        if (api_cfg.usage) "api" else "local",
+    );
+    try writeHelpStatusLine(
+        out,
+        use_color,
+        "Account API",
+        if (api_cfg.account) "ON" else "OFF",
+        null,
     );
 
-    if (use_color) try out.writeAll(ansi.bold);
-    try out.writeAll("Usage API:");
-    if (use_color) try out.writeAll(ansi.reset);
-    try out.print(
-        " {s} ({s})\n\n",
-        .{ if (api_cfg.usage) "ON" else "OFF", if (api_cfg.usage) "api" else "local" },
-    );
-
-    if (use_color) try out.writeAll(ansi.bold);
-    try out.writeAll("Account API:");
-    if (use_color) try out.writeAll(ansi.reset);
-    try out.print(
-        " {s}\n\n",
-        .{if (api_cfg.account) "ON" else "OFF"},
-    );
-
-    if (use_color) try out.writeAll(ansi.bold);
-    try out.writeAll("Commands:");
-    if (use_color) try out.writeAll(ansi.reset);
-    try out.writeAll("\n\n");
+    try writeHelpSectionTitle(out, use_color, "Commands");
 
     const commands = [_]HelpEntry{
         .{ .name = "--version, -V", .description = "Show version" },
@@ -652,13 +669,42 @@ pub fn writeHelp(
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[3].name, config_details[3].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[4].name, config_details[4].description);
 
-    try out.writeAll("\n");
-    if (use_color) try out.writeAll(ansi.bold);
-    try out.writeAll("Notes:");
-    if (use_color) try out.writeAll(ansi.reset);
-    try out.writeAll("\n\n");
+    try writeHelpSectionTitle(out, use_color, "Quick Start");
+    try out.writeAll("  codex-auth list\n");
+    try out.writeAll("  codex-auth switch\n");
+    try out.writeAll("  codex-auth login --device-auth\n");
+    try out.writeAll("  codex-auth import /path/to/auth.json --alias personal\n");
+
+    try writeHelpSectionTitle(out, use_color, "Notes");
     try out.writeAll("  Run `codex-auth <command> --help` for command-specific usage details.\n");
     try out.writeAll("  `config api enable` may trigger OpenAI account restrictions or suspension in some environments.\n");
+}
+
+fn writeHelpSectionTitle(out: *std.Io.Writer, use_color: bool, title: []const u8) !void {
+    try out.writeAll("\n");
+    if (use_color) try out.writeAll(ansi.bold);
+    try out.writeAll(title);
+    if (use_color) try out.writeAll(ansi.reset);
+    try out.writeAll("\n\n");
+}
+
+fn writeHelpStatusLine(
+    out: *std.Io.Writer,
+    use_color: bool,
+    label: []const u8,
+    value: []const u8,
+    detail: ?[]const u8,
+) !void {
+    if (use_color) try out.writeAll(ansi.dim);
+    try out.print("  {s:<11}", .{label});
+    if (use_color) try out.writeAll(ansi.reset);
+    try out.print(" {s}", .{value});
+    if (detail) |extra| {
+        if (use_color) try out.writeAll(ansi.dim);
+        try out.print(" ({s})", .{extra});
+        if (use_color) try out.writeAll(ansi.reset);
+    }
+    try out.writeAll("\n");
 }
 
 fn parsePercentArg(raw: []const u8) ?u8 {
@@ -688,7 +734,7 @@ fn writeHelpEntry(
     name: []const u8,
     description: []const u8,
 ) !void {
-    if (use_color) try out.writeAll(ansi.bold_green);
+    if (use_color) try out.writeAll(ansi.bold_cyan);
     var i: usize = 0;
     while (i < indent) : (i += 1) {
         try out.writeAll(" ");
@@ -703,7 +749,9 @@ fn writeHelpEntry(
         try out.writeAll(" ");
     }
 
+    if (use_color) try out.writeAll(ansi.dim);
     try out.writeAll(description);
+    if (use_color) try out.writeAll(ansi.reset);
     try out.writeAll("\n");
 }
 
@@ -780,7 +828,7 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
         },
         .list => {
             try out.writeAll("  codex-auth list [--debug]\n");
-            try out.writeAll("  codex-auth list --json [--refresh-usage]\n");
+            try out.writeAll("  codex-auth list --json [--refresh-usage | --refresh-active-usage]\n");
         },
         .status => try out.writeAll("  codex-auth status\n"),
         .login => {
@@ -831,6 +879,7 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth list --debug\n");
             try out.writeAll("  codex-auth list --json\n");
             try out.writeAll("  codex-auth list --json --refresh-usage\n");
+            try out.writeAll("  codex-auth list --json --refresh-active-usage\n");
         },
         .status => try out.writeAll("  codex-auth status\n"),
         .login => {
@@ -866,7 +915,7 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
 
 pub fn printUsageError(usage_err: *const UsageError) !void {
     var buffer: [2048]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buffer);
+    var writer = io_util.stderrWriter(&buffer);
     const out = &writer.interface;
     const use_color = stderrColorEnabled();
     try writeErrorPrefixTo(out, use_color);
@@ -905,7 +954,7 @@ pub fn printImportReport(report: *const registry.ImportReport) !void {
     var stdout: io_util.Stdout = undefined;
     stdout.init();
     var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = io_util.stderrWriter(&stderr_buffer);
     try writeImportReport(stdout.out(), &stderr_writer.interface, report);
 }
 
@@ -974,7 +1023,7 @@ pub fn writeHintPrefixTo(out: *std.Io.Writer, use_color: bool) !void {
 
 pub fn printAccountNotFoundError(query: []const u8) !void {
     var buffer: [512]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buffer);
+    var writer = io_util.stderrWriter(&buffer);
     const out = &writer.interface;
     const use_color = stderrColorEnabled();
     try writeErrorPrefixTo(out, use_color);
@@ -984,7 +1033,7 @@ pub fn printAccountNotFoundError(query: []const u8) !void {
 
 pub fn printRemoveRequiresTtyError() !void {
     var buffer: [512]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buffer);
+    var writer = io_util.stderrWriter(&buffer);
     const out = &writer.interface;
     const use_color = stderrColorEnabled();
     try writeErrorPrefixTo(out, use_color);
@@ -996,7 +1045,7 @@ pub fn printRemoveRequiresTtyError() !void {
 
 pub fn printInvalidRemoveSelectionError() !void {
     var buffer: [512]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buffer);
+    var writer = io_util.stderrWriter(&buffer);
     const out = &writer.interface;
     const use_color = stderrColorEnabled();
     try writeErrorPrefixTo(out, use_color);
@@ -1058,7 +1107,7 @@ pub fn writeRemoveConfirmationTo(out: *std.Io.Writer, labels: []const []const u8
 
 pub fn printRemoveConfirmationUnavailableError(labels: []const []const u8) !void {
     var buffer: [1024]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buffer);
+    var writer = io_util.stderrWriter(&buffer);
     const out = &writer.interface;
     const use_color = stderrColorEnabled();
     try writeMatchedAccountsListTo(out, labels);
@@ -1077,7 +1126,7 @@ pub fn confirmRemoveMatches(labels: []const []const u8) !bool {
     try out.flush();
 
     var buf: [64]u8 = undefined;
-    const n = try std.fs.File.stdin().read(&buf);
+    const n = try io_util.stdinRead(&buf);
     const line = std.mem.trim(u8, buf[0..n], " \n\r\t");
     return line.len == 1 and (line[0] == 'y' or line[0] == 'Y');
 }
@@ -1101,7 +1150,7 @@ pub fn printRemoveSummary(labels: []const []const u8) !void {
 
 fn writeCodexLoginLaunchFailureHint(err_name: []const u8, use_color: bool) !void {
     var buffer: [512]u8 = undefined;
-    var writer = std.fs.File.stderr().writer(&buffer);
+    var writer = io_util.stderrWriter(&buffer);
     const out = &writer.interface;
     try writeCodexLoginLaunchFailureHintTo(out, err_name, use_color);
     try out.flush();
@@ -1187,7 +1236,7 @@ pub fn selectAccountsToRemove(allocator: std.mem.Allocator, reg: *registry.Regis
     if (comptime builtin.os.tag == .windows) {
         return selectRemoveWithNumbers(allocator, reg);
     }
-    if (shouldUseNumberedRemoveSelector(false, std.fs.File.stdin().isTty())) {
+    if (shouldUseNumberedRemoveSelector(false, io_util.stdinIsTty())) {
         return selectRemoveWithNumbers(allocator, reg);
     }
     return selectRemoveInteractive(allocator, reg) catch selectRemoveWithNumbers(allocator, reg);
@@ -1245,7 +1294,7 @@ fn selectWithNumbers(
     try out.flush();
 
     var buf: [64]u8 = undefined;
-    const n = try std.fs.File.stdin().read(&buf);
+    const n = try io_util.stdinRead(&buf);
     const line = std.mem.trim(u8, buf[0..n], " \n\r\t");
     if (line.len == 0) {
         if (active_idx) |i| return accountIdForSelectable(&rows, reg, i);
@@ -1281,7 +1330,7 @@ fn selectWithNumbersFromIndices(
     try out.flush();
 
     var buf: [64]u8 = undefined;
-    const n = try std.fs.File.stdin().read(&buf);
+    const n = try io_util.stdinRead(&buf);
     const line = std.mem.trim(u8, buf[0..n], " \n\r\t");
     if (line.len == 0) {
         if (active_idx) |i| return accountIdForSelectable(&rows, reg, i);
@@ -1425,7 +1474,7 @@ fn selectRemoveWithNumbers(allocator: std.mem.Allocator, reg: *registry.Registry
     try out.flush();
 
     var buf: [256]u8 = undefined;
-    const n = try std.fs.File.stdin().read(&buf);
+    const n = try io_util.stdinRead(&buf);
     const line = std.mem.trim(u8, buf[0..n], " \n\r\t");
     if (line.len == 0) return null;
     if (!isStrictRemoveSelectionLine(line)) return error.InvalidRemoveSelectionInput;

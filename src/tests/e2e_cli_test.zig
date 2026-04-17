@@ -1223,8 +1223,8 @@ test "Scenario: Given default api usage when rendering help then the api enable 
 
     try expectSuccess(result);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "codex-auth") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Usage API: ON (api)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Account API: ON") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Usage API   ON (api)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Account API ON") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "`config api enable` may trigger OpenAI account restrictions or suspension in some environments.") != null);
     try std.testing.expectEqualStrings("", result.stderr);
 }
@@ -2092,6 +2092,6 @@ test "Scenario: Given default api usage when listing accounts then no warning is
     defer gpa.free(result.stderr);
 
     try expectSuccess(result);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ACCOUNT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "No saved accounts yet.") != null);
     try std.testing.expectEqualStrings("", result.stderr);
 }

@@ -30,6 +30,39 @@ final class CodexAuthMenuTests: XCTestCase {
         XCTAssertEqual(resolved, executable.path)
     }
 
+    func testResolveExecutablePathPrefersBundledCLIOverPathEntry() throws {
+        let tempRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let bundledExecutable = tempRoot.appendingPathComponent("bundled-codex-auth")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: bundledExecutable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: bundledExecutable.path
+        )
+
+        let binDir = tempRoot.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+        let pathExecutable = binDir.appendingPathComponent("codex-auth")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: pathExecutable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: pathExecutable.path
+        )
+
+        let resolved = CLIClient.resolveExecutablePath(
+            preferredPath: nil,
+            bundledPath: bundledExecutable.path,
+            environment: [
+                "HOME": tempRoot.path,
+                "PATH": binDir.path,
+            ],
+            shellResolver: { _ in nil }
+        )
+
+        XCTAssertEqual(resolved, bundledExecutable.path)
+    }
+
     func testCLIClientMissingCLIReportsError() {
         let client = CLIClient(
             executablePath: nil,
@@ -39,7 +72,7 @@ final class CodexAuthMenuTests: XCTestCase {
             shellResolver: { _ in nil }
         )
 
-        XCTAssertThrowsError(try client.loadState(refreshUsage: false)) { error in
+        XCTAssertThrowsError(try client.loadState(refreshScope: .none)) { error in
             XCTAssertEqual(error.localizedDescription, "未找到 codex-auth 命令。")
         }
     }
@@ -55,20 +88,67 @@ final class CodexAuthMenuTests: XCTestCase {
             shellResolver: { _ in nil }
         )
 
-        XCTAssertThrowsError(try client.loadState(refreshUsage: false)) { error in
+        XCTAssertThrowsError(try client.loadState(refreshScope: .none)) { error in
             XCTAssertEqual(error.localizedDescription, "codex-auth 执行失败：boom")
         }
+    }
+
+    func testCLIClientCurrentRefreshFallsBackToLegacyRefreshInLocalMode() throws {
+        let client = CLIClient(
+            executablePath: "/mock/codex-auth",
+            preferredPath: nil,
+            environment: [:],
+            commandRunner: { _, args, _ in
+                if args == ["list", "--json", "--refresh-active-usage"] {
+                    return CommandResult(
+                        stdout: Data(),
+                        stderr: Data("error: unknown flag `--refresh-active-usage` for `list`".utf8),
+                        status: 1
+                    )
+                }
+                if args == ["list", "--json"] {
+                    return Self.makeStateCommandResult(
+                        activeKey: "acct-primary",
+                        apiUsage: false,
+                        usageRequested: false,
+                        localOnlyMode: true
+                    )
+                }
+                if args == ["list", "--json", "--refresh-usage"] {
+                    return Self.makeStateCommandResult(
+                        activeKey: "acct-primary",
+                        apiUsage: false,
+                        usageRequested: true,
+                        localOnlyMode: true
+                    )
+                }
+                return CommandResult(stdout: Data(), stderr: Data("unexpected".utf8), status: 1)
+            },
+            shellResolver: { _ in nil }
+        )
+
+        let state = try client.loadState(refreshScope: .activeOnly)
+        XCTAssertFalse(state.api.usage)
+        XCTAssertTrue(state.refresh.localOnlyMode)
     }
 
     func testLocalWebServerStateRefreshSwitchAndHealth() async throws {
         let tempRoot = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let suiteName = "CodexAuthMenuTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.set(false, forKey: "restartCodexAfterSwitch")
+        defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let mock = MockCLI()
         let client = makeClient(home: tempRoot) { executablePath, args, environment in
             try mock.run(executablePath, args, environment)
         }
-        let server = LocalWebServer(cliClient: client)
+        let server = LocalWebServer(
+            cliClient: client,
+            userDefaults: defaults,
+            codexAppRestarter: { .restarted }
+        )
         defer { server.stop() }
 
         try server.start()
@@ -95,16 +175,16 @@ final class CodexAuthMenuTests: XCTestCase {
         let state = try JSONDecoder().decode(CodexState.self, from: stateResponse.body)
         XCTAssertEqual(state.activeAccountKey, "acct-primary")
 
-        let refreshResponse = try await request(
+        let activeRefreshResponse = try await request(
             baseURL: controlURL,
-            path: "/api/refresh",
+            path: "/api/refresh-active",
             token: token,
             method: "POST"
         )
-        XCTAssertEqual(refreshResponse.statusCode, 200)
-        let refreshed = try JSONDecoder().decode(CodexState.self, from: refreshResponse.body)
-        XCTAssertEqual(refreshed.refresh.updated, 1)
-        XCTAssertTrue(refreshed.refresh.usageRequested)
+        XCTAssertEqual(activeRefreshResponse.statusCode, 200)
+        let activeRefreshed = try JSONDecoder().decode(CodexState.self, from: activeRefreshResponse.body)
+        XCTAssertEqual(activeRefreshed.refresh.attempted, 1)
+        XCTAssertEqual(activeRefreshed.refresh.updated, 1)
 
         let switchResponse = try await request(
             baseURL: controlURL,
@@ -118,8 +198,9 @@ final class CodexAuthMenuTests: XCTestCase {
         XCTAssertEqual(switched.activeAccountKey, "acct-secondary")
 
         let snapshot = mock.snapshot()
-        XCTAssertEqual(snapshot.refreshCalls, 1)
+        XCTAssertEqual(snapshot.activeRefreshCalls, 1)
         XCTAssertEqual(snapshot.switchKeys, ["acct-secondary"])
+        XCTAssertEqual(switchResponse.headers["x-codex-restart-result"], "disabled")
     }
 
     func testLocalWebServerRejectsMissingTokenAndReturnsCLIFailures() async throws {
@@ -160,6 +241,143 @@ final class CodexAuthMenuTests: XCTestCase {
             try JSONDecoder().decode(ErrorPayload.self, from: failure.body).error,
             "codex-auth 执行失败：boom"
         )
+    }
+
+    func testLocalWebServerPreferencesLoginAndRestartHeader() async throws {
+        let tempRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let suiteName = "CodexAuthMenuTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let mock = MockCLI()
+        let actions = MockActionRecorder()
+        let client = makeClient(home: tempRoot) { executablePath, args, environment in
+            try mock.run(executablePath, args, environment)
+        }
+        let server = LocalWebServer(
+            cliClient: client,
+            userDefaults: defaults,
+            loginLauncher: { _, deviceAuth in
+                actions.recordLogin(deviceAuth)
+            },
+            importLauncher: { _, source in
+                actions.recordImport(source)
+                return source == .cpaDefault ? .cancelled : .launched
+            },
+            codexAppRestarter: {
+                actions.recordRestart()
+                return .restarted
+            }
+        )
+        defer { server.stop() }
+
+        var preferenceChangedCount = 0
+        server.onPreferencesChanged = {
+            preferenceChangedCount += 1
+        }
+
+        try server.start()
+        let controlURL = try waitForControlURL(server)
+        let token = try XCTUnwrap(Self.token(from: controlURL))
+
+        let initialPreferences = try await request(
+            baseURL: controlURL,
+            path: "/api/preferences",
+            token: token
+        )
+        XCTAssertEqual(initialPreferences.statusCode, 200)
+        XCTAssertEqual(
+            try JSONDecoder().decode(PreferencesPayload.self, from: initialPreferences.body).restartCodexAfterSwitch,
+            true
+        )
+
+        let loginResponse = try await request(
+            baseURL: controlURL,
+            path: "/api/login",
+            token: token,
+            method: "POST",
+            body: Data(#"{"device_auth":true}"#.utf8)
+        )
+        XCTAssertEqual(loginResponse.statusCode, 200)
+        let loginPayload = try JSONDecoder().decode(ActionPayload.self, from: loginResponse.body)
+        XCTAssertTrue(loginPayload.ok)
+        XCTAssertEqual(actions.snapshot().loginCalls, [true])
+
+        let standardImport = try await request(
+            baseURL: controlURL,
+            path: "/api/import",
+            token: token,
+            method: "POST",
+            body: Data(#"{"source":"standard"}"#.utf8)
+        )
+        XCTAssertEqual(standardImport.statusCode, 200)
+        let standardImportPayload = try JSONDecoder().decode(ActionPayload.self, from: standardImport.body)
+        XCTAssertTrue(standardImportPayload.ok)
+        XCTAssertEqual(actions.snapshot().importCalls, [.standard])
+
+        let cancelledImport = try await request(
+            baseURL: controlURL,
+            path: "/api/import",
+            token: token,
+            method: "POST",
+            body: Data(#"{"source":"cpa_default"}"#.utf8)
+        )
+        XCTAssertEqual(cancelledImport.statusCode, 200)
+        let cancelledImportPayload = try JSONDecoder().decode(ActionPayload.self, from: cancelledImport.body)
+        XCTAssertFalse(cancelledImportPayload.ok)
+        XCTAssertEqual(actions.snapshot().importCalls, [.standard, .cpaDefault])
+
+        let disabledPreferences = try await request(
+            baseURL: controlURL,
+            path: "/api/preferences",
+            token: token,
+            method: "POST",
+            body: Data(#"{"restart_codex_after_switch":false}"#.utf8)
+        )
+        XCTAssertEqual(disabledPreferences.statusCode, 200)
+        XCTAssertEqual(
+            try JSONDecoder().decode(PreferencesPayload.self, from: disabledPreferences.body).restartCodexAfterSwitch,
+            false
+        )
+        XCTAssertEqual(preferenceChangedCount, 1)
+
+        let disabledSwitch = try await request(
+            baseURL: controlURL,
+            path: "/api/switch",
+            token: token,
+            method: "POST",
+            body: Data(#"{"account_key":"acct-secondary"}"#.utf8)
+        )
+        XCTAssertEqual(disabledSwitch.statusCode, 200)
+        XCTAssertEqual(disabledSwitch.headers["x-codex-restart-result"], "disabled")
+        XCTAssertEqual(actions.snapshot().restartCalls, 0)
+
+        let enabledPreferences = try await request(
+            baseURL: controlURL,
+            path: "/api/preferences",
+            token: token,
+            method: "POST",
+            body: Data(#"{"restart_codex_after_switch":true}"#.utf8)
+        )
+        XCTAssertEqual(enabledPreferences.statusCode, 200)
+        XCTAssertEqual(
+            try JSONDecoder().decode(PreferencesPayload.self, from: enabledPreferences.body).restartCodexAfterSwitch,
+            true
+        )
+        XCTAssertEqual(preferenceChangedCount, 2)
+
+        let enabledSwitch = try await request(
+            baseURL: controlURL,
+            path: "/api/switch",
+            token: token,
+            method: "POST",
+            body: Data(#"{"account_key":"acct-primary"}"#.utf8)
+        )
+        XCTAssertEqual(enabledSwitch.statusCode, 200)
+        XCTAssertEqual(enabledSwitch.headers["x-codex-restart-result"], "restarted")
+        XCTAssertEqual(actions.snapshot().restartCalls, 1)
     }
 
     func testHTTPRequestParserWaitsForCompleteBody() {
@@ -247,7 +465,12 @@ final class CodexAuthMenuTests: XCTestCase {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
-        return HTTPResponse(statusCode: httpResponse.statusCode, body: data)
+        var headers: [String: String] = [:]
+        for (name, value) in httpResponse.allHeaderFields {
+            guard let key = name as? String else { continue }
+            headers[key.lowercased()] = String(describing: value)
+        }
+        return HTTPResponse(statusCode: httpResponse.statusCode, headers: headers, body: data)
     }
 
     private static func token(from controlURL: URL) -> String? {
@@ -260,7 +483,7 @@ final class CodexAuthMenuTests: XCTestCase {
 
 private final class MockCLI: @unchecked Sendable {
     private let lock = NSLock()
-    private var refreshCallCount = 0
+    private var activeRefreshCallCount = 0
     private var switchAccountKeys: [String] = []
 
     func run(_ executablePath: String, _ args: [String], _ environment: [String: String]) throws -> CommandResult {
@@ -273,9 +496,9 @@ private final class MockCLI: @unchecked Sendable {
         if args == ["list", "--json"] {
             return state(activeKey: "acct-primary")
         }
-        if args == ["list", "--json", "--refresh-usage"] {
-            refreshCallCount += 1
-            return state(activeKey: "acct-primary", usageRequested: true, updated: 1)
+        if args == ["list", "--json", "--refresh-active-usage"] {
+            activeRefreshCallCount += 1
+            return state(activeKey: "acct-primary", usageRequested: true, attempted: 1, updated: 1)
         }
         if args.count == 4,
            args[0] == "switch",
@@ -293,16 +516,78 @@ private final class MockCLI: @unchecked Sendable {
         )
     }
 
-    func snapshot() -> (refreshCalls: Int, switchKeys: [String]) {
+    func snapshot() -> (activeRefreshCalls: Int, switchKeys: [String]) {
         lock.lock()
         defer { lock.unlock() }
-        return (refreshCallCount, switchAccountKeys)
+        return (activeRefreshCallCount, switchAccountKeys)
     }
 
     private func state(
         activeKey: String,
+        apiUsage: Bool = true,
         usageRequested: Bool = false,
-        updated: Int = 0
+        attempted: Int = 0,
+        updated: Int = 0,
+        localOnlyMode: Bool = false
+    ) -> CommandResult {
+        return CodexAuthMenuTests.makeStateCommandResult(
+            activeKey: activeKey,
+            apiUsage: apiUsage,
+            usageRequested: usageRequested,
+            attempted: attempted,
+            updated: updated,
+            localOnlyMode: localOnlyMode
+        )
+    }
+}
+
+private struct HealthPayload: Decodable {
+    var ok: Bool
+    var cliPath: String
+    var version: String
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case cliPath = "cli_path"
+        case version
+    }
+}
+
+private struct ErrorPayload: Decodable {
+    var error: String
+}
+
+private struct PreferencesPayload: Decodable {
+    var restartCodexAfterSwitch: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case restartCodexAfterSwitch = "restart_codex_after_switch"
+    }
+}
+
+private struct ActionPayload: Decodable {
+    var ok: Bool
+    var message: String
+}
+
+private struct HTTPResponse {
+    var statusCode: Int
+    var headers: [String: String]
+    var body: Data
+}
+
+private enum TestError: Error {
+    case timeout
+}
+
+private extension CodexAuthMenuTests {
+    static func makeStateCommandResult(
+        activeKey: String,
+        apiUsage: Bool = true,
+        usageRequested: Bool = false,
+        attempted: Int = 0,
+        updated: Int = 0,
+        localOnlyMode: Bool = false
     ) -> CommandResult {
         let primaryActive = activeKey == "acct-primary"
         let secondaryActive = activeKey == "acct-secondary"
@@ -312,7 +597,7 @@ private final class MockCLI: @unchecked Sendable {
           "codex_home": "/tmp/mock-codex",
           "active_account_key": "\(activeKey)",
           "api": {
-            "usage": true,
+            "usage": \(apiUsage),
             "account": true
           },
           "accounts": [
@@ -383,11 +668,11 @@ private final class MockCLI: @unchecked Sendable {
           ],
           "refresh": {
             "usage_requested": \(usageRequested),
-            "attempted": \(usageRequested ? 1 : 0),
+            "attempted": \(attempted),
             "updated": \(updated),
             "failed": 0,
-            "unchanged": 0,
-            "local_only_mode": false
+            "unchanged": \(usageRequested && updated == 0 && attempted > 0 ? attempted : 0),
+            "local_only_mode": \(localOnlyMode)
           }
         }
         """
@@ -395,27 +680,33 @@ private final class MockCLI: @unchecked Sendable {
     }
 }
 
-private struct HealthPayload: Decodable {
-    var ok: Bool
-    var cliPath: String
-    var version: String
+private final class MockActionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var loginDeviceAuthValues: [Bool] = []
+    private var importSources: [CodexImportSource] = []
+    private var restartCount = 0
 
-    enum CodingKeys: String, CodingKey {
-        case ok
-        case cliPath = "cli_path"
-        case version
+    func recordLogin(_ deviceAuth: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        loginDeviceAuthValues.append(deviceAuth)
     }
-}
 
-private struct ErrorPayload: Decodable {
-    var error: String
-}
+    func recordImport(_ source: CodexImportSource) {
+        lock.lock()
+        defer { lock.unlock() }
+        importSources.append(source)
+    }
 
-private struct HTTPResponse {
-    var statusCode: Int
-    var body: Data
-}
+    func recordRestart() {
+        lock.lock()
+        defer { lock.unlock() }
+        restartCount += 1
+    }
 
-private enum TestError: Error {
-    case timeout
+    func snapshot() -> (loginCalls: [Bool], importCalls: [CodexImportSource], restartCalls: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (loginDeviceAuthValues, importSources, restartCount)
+    }
 }

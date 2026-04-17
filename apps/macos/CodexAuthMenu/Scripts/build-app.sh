@@ -12,6 +12,53 @@ BUNDLE_PATH="$BUILD_DIR/$APP_NAME.app"
 EXECUTABLE_PATH="$BUNDLE_PATH/Contents/MacOS/$APP_NAME"
 ICON_PATH="$APP_DIR/Resources/AppIcon.icns"
 ICON_PREVIEW_PATH="$APP_DIR/Resources/AppIcon.png"
+BUNDLED_CLI_PATH="${BUNDLED_CLI_PATH:-}"
+ZIG_EXECUTABLE="${ZIG_EXECUTABLE:-}"
+
+if [ -z "$ZIG_EXECUTABLE" ] && command -v zig >/dev/null 2>&1; then
+  ZIG_EXECUTABLE="$(command -v zig)"
+fi
+
+build_bundled_cli() {
+  if [ -n "$BUNDLED_CLI_PATH" ] && [ -x "$BUNDLED_CLI_PATH" ]; then
+    return 0
+  fi
+
+  if [ -n "$ZIG_EXECUTABLE" ] && [ -x "$ZIG_EXECUTABLE" ]; then
+    local sdk_root
+    sdk_root="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}"
+    local machine
+    machine="$(uname -m)"
+    local zig_target
+    case "$machine" in
+      arm64) zig_target="aarch64-macos" ;;
+      x86_64) zig_target="x86_64-macos" ;;
+      *)
+        echo "Warning: unsupported macOS architecture for bundled codex-auth: $machine" >&2
+        return 1
+        ;;
+    esac
+
+    local direct_build_path="$BUILD_DIR/codex-auth"
+    echo "Building bundled codex-auth CLI..."
+    "$ZIG_EXECUTABLE" build-exe \
+      "$REPO_ROOT/src/main.zig" \
+      -lc \
+      -target "$zig_target" \
+      --sysroot "$sdk_root" \
+      -O ReleaseSafe \
+      -femit-bin="$direct_build_path"
+    BUNDLED_CLI_PATH="$direct_build_path"
+    return 0
+  fi
+
+  if [ -x "$REPO_ROOT/zig-out/bin/codex-auth" ]; then
+    BUNDLED_CLI_PATH="$REPO_ROOT/zig-out/bin/codex-auth"
+    return 0
+  fi
+
+  return 1
+}
 
 if [ ! -f "$ICON_PATH" ] || [ ! -f "$ICON_PREVIEW_PATH" ]; then
   swift "$APP_DIR/Scripts/generate-icon.swift"
@@ -28,6 +75,14 @@ mkdir -p "$BUNDLE_PATH/Contents/Resources"
 
 cp "$SCRATCH_PATH/$CONFIGURATION/$APP_NAME" "$EXECUTABLE_PATH"
 chmod +x "$EXECUTABLE_PATH"
+
+if build_bundled_cli; then
+  cp "$BUNDLED_CLI_PATH" "$BUNDLE_PATH/Contents/Resources/codex-auth"
+  chmod +x "$BUNDLE_PATH/Contents/Resources/codex-auth"
+else
+  echo "Warning: no bundled codex-auth CLI was found; the app will fall back to PATH." >&2
+fi
+
 cp "$ICON_PATH" "$BUNDLE_PATH/Contents/Resources/AppIcon.icns"
 if [ -f "$ICON_PREVIEW_PATH" ]; then
   cp "$ICON_PREVIEW_PATH" "$BUNDLE_PATH/Contents/Resources/AppIcon.png"

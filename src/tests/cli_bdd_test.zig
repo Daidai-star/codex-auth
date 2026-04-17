@@ -200,13 +200,50 @@ test "Scenario: Given list json flags when parsing then machine output options a
     }
 }
 
+test "Scenario: Given list active refresh json flag when parsing then machine output options are preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "list", "--json", "--refresh-active-usage" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .list => |opts| {
+                try std.testing.expect(opts.json);
+                try std.testing.expect(!opts.refresh_usage);
+                try std.testing.expect(opts.refresh_active_usage);
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
 test "Scenario: Given list refresh without json when parsing then usage error is returned" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "list", "--refresh-usage" };
     var result = try cli.parseArgs(gpa, &args);
     defer cli.freeParseResult(gpa, &result);
 
-    try expectUsageError(result, .list, "requires `--json`");
+    try expectUsageError(result, .list, "require `--json`");
+}
+
+test "Scenario: Given list active refresh without json when parsing then usage error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "list", "--refresh-active-usage" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .list, "require `--json`");
+}
+
+test "Scenario: Given list refresh flags combined when parsing then usage error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "list", "--json", "--refresh-usage", "--refresh-active-usage" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .list, "cannot combine");
 }
 
 test "Scenario: Given login with removed no-login flag when parsing then usage error is returned" {
@@ -275,10 +312,14 @@ test "Scenario: Given help when rendering then login and command help notes are 
     try cli.writeHelp(&aw.writer, false, &auto_cfg, &api_cfg);
 
     const help = aw.written();
-    try std.testing.expect(std.mem.indexOf(u8, help, "Auto Switch: ON (5h<12%, weekly<8%)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "Usage API: ON (api)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "Account API: ON") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Command-line account switching for Codex.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Runtime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Auto Switch ON (5h<12%, weekly<8%)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Usage API   ON (api)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Account API ON") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "--cpa [<path>]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "Quick Start") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "codex-auth login --device-auth") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Run `codex-auth <command> --help` for command-specific usage details.") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "`config api enable` may trigger OpenAI account restrictions or suspension in some environments.") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "login") != null);
@@ -307,6 +348,7 @@ test "Scenario: Given simple command help when rendering then examples are omitt
     try std.testing.expect(std.mem.indexOf(u8, help, "codex-auth list") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "List available accounts.") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Usage:\n  codex-auth list [--debug]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help, "--refresh-active-usage") != null);
     try std.testing.expect(std.mem.indexOf(u8, help, "Examples:") == null);
 }
 
