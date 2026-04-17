@@ -14,9 +14,35 @@ ICON_PATH="$APP_DIR/Resources/AppIcon.icns"
 ICON_PREVIEW_PATH="$APP_DIR/Resources/AppIcon.png"
 BUNDLED_CLI_PATH="${BUNDLED_CLI_PATH:-}"
 ZIG_EXECUTABLE="${ZIG_EXECUTABLE:-}"
+APP_VERSION="${APP_VERSION:-}"
+APP_SHORT_VERSION="${APP_SHORT_VERSION:-}"
+APP_BUNDLE_VERSION="${APP_BUNDLE_VERSION:-}"
 
 if [ -z "$ZIG_EXECUTABLE" ] && command -v zig >/dev/null 2>&1; then
   ZIG_EXECUTABLE="$(command -v zig)"
+fi
+
+if [ -z "$APP_VERSION" ]; then
+  APP_VERSION="$(awk -F'"' '/app_version/ { print $2; exit }' "$REPO_ROOT/src/version.zig")"
+fi
+
+if [ -z "$APP_VERSION" ]; then
+  echo "Warning: unable to resolve app version from src/version.zig; falling back to 0.1.0" >&2
+  APP_VERSION="0.1.0"
+fi
+
+if [ -z "$APP_SHORT_VERSION" ]; then
+  APP_SHORT_VERSION="${APP_VERSION%%-*}"
+fi
+
+if [ -z "$APP_BUNDLE_VERSION" ]; then
+  APP_BUNDLE_VERSION="$APP_SHORT_VERSION"
+  if [[ "$APP_VERSION" == *-* ]]; then
+    suffix_digits="$(printf '%s' "${APP_VERSION#"$APP_SHORT_VERSION"}" | tr -cd '0-9.')"
+    if [ -n "$suffix_digits" ]; then
+      APP_BUNDLE_VERSION="$APP_SHORT_VERSION.$suffix_digits"
+    fi
+  fi
 fi
 
 build_bundled_cli() {
@@ -106,9 +132,9 @@ cat > "$BUNDLE_PATH/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>$APP_SHORT_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>$APP_BUNDLE_VERSION</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSUIElement</key>

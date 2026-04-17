@@ -84,6 +84,7 @@ This document describes the repository's CI, preview package publishing, and tag
 - Tag pushes matching `v*` run `.github/workflows/release.yml`.
 - The release workflow first validates the code with the same `build-test` matrix used by CI.
 - It then cross-builds release assets for the six supported targets on Ubuntu.
+- The same release workflow also builds the macOS menu bar app on Intel and Apple Silicon runners and attaches zipped `.app` bundles to the GitHub release.
 - Release notes are generated from git tags and commit history.
 - GitHub releases are published automatically from the tag pipeline.
 - Stable tags create normal GitHub releases.

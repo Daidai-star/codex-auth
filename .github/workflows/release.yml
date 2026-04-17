@@ -113,10 +113,49 @@ jobs:
           name: bundle-${{ matrix.id }}
           path: artifacts
 
+  menu-app-assets:
+    name: Build Menu App (${{ matrix.id }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: darwin-x64-app
+            runner: macos-13
+            archive_name: CodexAuthMenu-macOS-X64.zip
+          - id: darwin-arm64-app
+            runner: macos-14
+            archive_name: CodexAuthMenu-macOS-ARM64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Build menu app archive
+        shell: bash
+        run: |
+          BUILD_DIR="$RUNNER_TEMP/codex-auth-menu-app/${{ matrix.id }}/build" \
+          OUTPUT_DIR="$RUNNER_TEMP/codex-auth-menu-app/${{ matrix.id }}/artifacts/${{ matrix.id }}" \
+          SCRATCH_PATH="$RUNNER_TEMP/codex-auth-menu-app/${{ matrix.id }}/swift-build" \
+          ARCHIVE_NAME="${{ matrix.archive_name }}" \
+          ZIG_EXECUTABLE="$(command -v zig)" \
+            bash apps/macos/CodexAuthMenu/Scripts/package-release-app.sh
+
+      - name: Upload menu app archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ matrix.id }}
+          path: ${{ runner.temp }}/codex-auth-menu-app/${{ matrix.id }}/artifacts
+
   publish-release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [build-test, release-assets]
+    needs: [build-test, release-assets, menu-app-assets]
     steps:
       - name: Checkout
         uses: actions/checkout@v6

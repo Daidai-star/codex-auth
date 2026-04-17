@@ -173,9 +173,9 @@ enum CodexDesktopController {
 
     static func loginStatusMessage(deviceAuth: Bool) -> String {
         if deviceAuth {
-            return "已在终端打开设备码登录。完成后回到这里点“重新加载”即可。"
+            return "已在终端打开设备码登录。若终端提示找不到 codex，请先安装官方 Codex CLI。完成后回到这里点“重新加载”即可。"
         }
-        return "已在终端打开账号登录。完成后回到这里点“重新加载”即可。"
+        return "已在终端打开账号登录。若终端提示找不到 codex，请先安装官方 Codex CLI。完成后回到这里点“重新加载”即可。"
     }
 
     static func importStatusMessage(source: CodexImportSource) -> String {
