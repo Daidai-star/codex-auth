@@ -374,6 +374,53 @@ enum WebControlPage {
       min-width: 0;
     }
 
+    .renewal-row {
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 12px;
+      grid-column: 1 / -1;
+      margin-top: 2px;
+      padding-top: 14px;
+    }
+
+    .renewal-summary {
+      color: var(--muted);
+      display: grid;
+      font-size: 12px;
+      gap: 4px;
+      line-height: 1.55;
+    }
+
+    .renewal-summary.warning {
+      color: var(--clay);
+    }
+
+    .renewal-summary.error {
+      color: var(--danger);
+    }
+
+    .renewal-tools {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: minmax(0, 1fr) repeat(2, auto);
+    }
+
+    .renewal-input {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--ink);
+      min-height: 40px;
+      outline: none;
+      padding: 0 12px;
+      width: 100%;
+    }
+
+    .renewal-input:focus {
+      border-color: var(--clay);
+      box-shadow: 0 0 0 4px var(--focus);
+    }
+
     .side-rail {
       display: grid;
       gap: 14px;
@@ -655,6 +702,10 @@ enum WebControlPage {
         grid-column: auto;
         grid-template-columns: 1fr;
       }
+
+      .renewal-tools {
+        grid-template-columns: 1fr 1fr;
+      }
     }
 
     @media (max-width: 480px) {
@@ -675,6 +726,10 @@ enum WebControlPage {
         border-top: 1px solid var(--line);
         padding-left: 0;
         padding-top: 12px;
+      }
+
+      .renewal-tools {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -748,10 +803,23 @@ enum WebControlPage {
           <p class="panel-copy">只处理你明确点下去的动作。</p>
           <div class="button-row">
             <button class="button primary" id="refreshCurrent">同步当前额度</button>
+            <button class="button secondary" id="refreshAll">刷新全部额度</button>
             <button class="button secondary" id="reload">重新加载</button>
             <button class="button secondary" id="addAccount">账号登录</button>
             <button class="button secondary" id="deviceAuth">设备码登录</button>
           </div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">风险开关</h2>
+          <p class="panel-copy" id="apiConfigNote">默认全部关闭；只有你主动开启时，才会对更多账号调用相关接口。</p>
+          <label class="toggle">
+            <span class="toggle-copy" id="usageApiLabel">额度 / 账号 API：读取中</span>
+            <input id="usageApiToggle" type="checkbox">
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
         </section>
 
         <section class="panel">
@@ -787,6 +855,7 @@ enum WebControlPage {
       query: "",
       busy: false,
       preferenceBusy: false,
+      apiBusy: false,
       restartCodexAfterSwitch: true
     };
 
@@ -805,12 +874,16 @@ enum WebControlPage {
     const scanCPAEl = document.getElementById("scanCPA");
     const reloadEl = document.getElementById("reload");
     const refreshCurrentEl = document.getElementById("refreshCurrent");
+    const refreshAllEl = document.getElementById("refreshAll");
     const restartToggleEl = document.getElementById("restartToggle");
     const toggleLabelEl = document.getElementById("toggleLabel");
     const preferenceNoteEl = document.getElementById("preferenceNote");
     const accountCountEl = document.getElementById("accountCount");
     const modeValueEl = document.getElementById("modeValue");
     const sourceChipEl = document.getElementById("sourceChip");
+    const usageApiToggleEl = document.getElementById("usageApiToggle");
+    const usageApiLabelEl = document.getElementById("usageApiLabel");
+    const apiConfigNoteEl = document.getElementById("apiConfigNote");
 
     brandIconEl.src = `/app-icon.png?token=${encodeURIComponent(token)}`;
 
@@ -833,7 +906,9 @@ enum WebControlPage {
       scanCPAEl.disabled = disabled;
       reloadEl.disabled = disabled;
       refreshCurrentEl.disabled = disabled;
+      refreshAllEl.disabled = disabled || !state.api || state.api.usage !== true;
       restartToggleEl.disabled = disabled || state.preferenceBusy;
+      usageApiToggleEl.disabled = disabled || state.apiBusy;
     }
 
     async function api(path, options = {}) {
@@ -891,21 +966,60 @@ enum WebControlPage {
       }
     }
 
+    function usageStatusPresentation(status) {
+      if (status === "NodeJsRequired") {
+        return {
+          shortLabel: "需要 Node",
+          summary: "需要本机 Node.js 18+",
+          detail: "额度刷新依赖本机 Node.js 18+ 运行环境。重新打开 App 后会自动重试。"
+        };
+      }
+      if (status === "MissingAuth") {
+        return {
+          shortLabel: "不支持",
+          summary: "当前登录态不支持额度接口",
+          detail: "这个账号当前没有可用的 ChatGPT 额度接口凭证。"
+        };
+      }
+      if (status === "TimedOut") {
+        return {
+          shortLabel: "超时",
+          summary: "额度接口请求超时",
+          detail: "这次刷新超时了，稍后重试通常就够了。"
+        };
+      }
+      if (/^\d+$/.test(String(status || ""))) {
+        return {
+          shortLabel: String(status),
+          summary: `额度接口返回 ${status}`,
+          detail: `接口返回了 ${status} 状态，暂时没拿到新的额度结果。`
+        };
+      }
+      return {
+        shortLabel: "失败",
+        summary: "额度刷新失败",
+        detail: `接口返回了 ${status}，这次没有拿到新的额度结果。`
+      };
+    }
+
     function usageSummary(account) {
       if (!account.usage) {
         return {
           fiveHourLabel: "等待同步",
           weeklyLabel: "等待同步",
           fiveHourPercent: 4,
-          weeklyPercent: 4
+          weeklyPercent: 4,
+          detail: "还没有额度同步记录。"
         };
       }
       if (account.usage.status && account.usage.status !== "ok") {
+        const presentation = usageStatusPresentation(account.usage.status);
         return {
-          fiveHourLabel: account.usage.status,
-          weeklyLabel: account.usage.status,
+          fiveHourLabel: presentation.shortLabel,
+          weeklyLabel: presentation.shortLabel,
           fiveHourPercent: 8,
-          weeklyPercent: 8
+          weeklyPercent: 8,
+          detail: presentation.detail
         };
       }
       const fiveHourRemaining = account.usage.five_hour && account.usage.five_hour.remaining_percent !== null
@@ -918,11 +1032,15 @@ enum WebControlPage {
         fiveHourLabel: fiveHourRemaining === null ? "--" : `${fiveHourRemaining}%`,
         weeklyLabel: weeklyRemaining === null ? "--" : `${weeklyRemaining}%`,
         fiveHourPercent: fiveHourRemaining === null ? 4 : Math.max(4, Math.min(100, fiveHourRemaining)),
-        weeklyPercent: weeklyRemaining === null ? 4 : Math.max(4, Math.min(100, weeklyRemaining))
+        weeklyPercent: weeklyRemaining === null ? 4 : Math.max(4, Math.min(100, weeklyRemaining)),
+        detail: null
       };
     }
 
     function syncLine(account) {
+      if (account && account.usage && account.usage.status && account.usage.status !== "ok") {
+        return usageStatusPresentation(account.usage.status).summary;
+      }
       if (!account || !account.last_usage_at) {
         return "本地额度还没同步到这张卡片。";
       }
@@ -945,13 +1063,14 @@ enum WebControlPage {
     }
 
     function renderMetaLine(active) {
+      const usageMode = state.api && state.api.usage ? "API" : "本地";
       if (!active) {
-        metaLineEl.textContent = "本地模式下，额度来自最近使用记录，可能会延迟。先添加一个账号，我们就能开始切换。";
+        metaLineEl.textContent = `${usageMode} 模式 · 续费日使用手动记录和提醒。先添加一个账号，我们就能开始切换。`;
         return;
       }
       const plan = active.plan || "未知套餐";
       const alias = active.alias ? ` · ${active.alias}` : "";
-      metaLineEl.textContent = `${active.email}${alias} · ${plan} · 本地模式下额度可能会延迟更新。`;
+      metaLineEl.textContent = `${active.email}${alias} · ${plan} · 当前额度来源：${usageMode} · 手动续费提醒`;
     }
 
     function renderPreferences() {
@@ -962,11 +1081,60 @@ enum WebControlPage {
         : "切换后只更新登录态，你可以自己决定什么时候重新打开 Codex。";
     }
 
+    function renderAPIConfig() {
+      const api = state.api || { usage: false };
+      usageApiToggleEl.checked = !!api.usage;
+      usageApiLabelEl.textContent = `额度 / 账号 API：${api.usage ? "已开启" : "已关闭"}`;
+      apiConfigNoteEl.textContent = api.usage
+        ? "已允许刷新全部账号额度和账号名接口。关闭后，全部额度刷新会被禁用。"
+        : "默认只保留本地同步；续费日只做手动记录和到期提醒。";
+    }
+
     function renderStatusMetrics() {
       accountCountEl.textContent = String(state.accounts.length);
       const localMode = !state.api || state.api.usage === false;
       modeValueEl.textContent = localMode ? "本地" : "API";
       sourceChipEl.textContent = localMode ? "本地额度" : "API 额度";
+    }
+
+    function daysUntil(dateString) {
+      if (!dateString) return null;
+      const target = new Date(`${dateString}T00:00:00`);
+      if (Number.isNaN(target.getTime())) return null;
+      const today = new Date();
+      const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      return Math.round((target.getTime() - startOfToday.getTime()) / 86400000);
+    }
+
+    function renewalSummary(account) {
+      const renewal = account.renewal || { status: "missing" };
+      const date = renewal.next_renewal_at;
+      const days = daysUntil(date);
+      const updated = renewal.updated_at ? `更新于：${formatDate(renewal.updated_at)}` : "还没有续费记录。";
+
+      if (date) {
+        let detail = updated;
+        let tone = "neutral";
+        if (days !== null && days < 0) {
+          detail = `已过期 ${Math.abs(days)} 天，请确认是否已经续费。`;
+          tone = "error";
+        } else if (days !== null && days <= 7) {
+          detail = `还有 ${days} 天到期，记得提前处理。`;
+          tone = "warning";
+        }
+        return {
+          title: `下次续费：${date}`,
+          detail,
+          tone,
+          inputValue: date
+        };
+      }
+      return {
+        title: "下次续费：未设置",
+        detail: "手动记录一个日期后，我们会在 7 天内高亮提醒。",
+        tone: "neutral",
+        inputValue: ""
+      };
     }
 
     function renderAccounts() {
@@ -1046,7 +1214,14 @@ enum WebControlPage {
         time.className = "account-time";
         time.textContent = `最近使用：${formatDate(account.last_used_at)}`;
 
-        meta.append(sync, time);
+        const renewal = renewalSummary(account);
+        const renewalMeta = document.createElement("div");
+        renewalMeta.textContent = renewal.title;
+
+        const renewalDetail = document.createElement("div");
+        renewalDetail.textContent = renewal.detail;
+
+        meta.append(sync, time, renewalMeta, renewalDetail);
 
         const action = document.createElement("button");
         action.className = `button ${account.active ? "secondary" : "primary"} account-action`;
@@ -1055,7 +1230,41 @@ enum WebControlPage {
         action.addEventListener("click", () => switchAccount(account.account_key));
         foot.append(meta, action);
 
-        tile.append(header, usageGrid, foot);
+        const renewalRow = document.createElement("div");
+        renewalRow.className = "renewal-row";
+
+        const renewalSummaryEl = document.createElement("div");
+        renewalSummaryEl.className = `renewal-summary${renewal.tone === "neutral" ? "" : ` ${renewal.tone}`}`;
+        const renewalTitle = document.createElement("div");
+        renewalTitle.textContent = renewal.title;
+        const renewalCopy = document.createElement("div");
+        renewalCopy.textContent = renewal.detail;
+        renewalSummaryEl.append(renewalTitle, renewalCopy);
+
+        const renewalTools = document.createElement("div");
+        renewalTools.className = "renewal-tools";
+        const renewalInput = document.createElement("input");
+        renewalInput.className = "renewal-input";
+        renewalInput.type = "date";
+        renewalInput.value = renewal.inputValue;
+        renewalInput.disabled = state.busy;
+
+        const saveButton = document.createElement("button");
+        saveButton.className = "button secondary";
+        saveButton.textContent = "保存";
+        saveButton.disabled = state.busy;
+        saveButton.addEventListener("click", () => setRenewal(account.account_key, renewalInput.value));
+
+        const clearButton = document.createElement("button");
+        clearButton.className = "button secondary";
+        clearButton.textContent = "清除";
+        clearButton.disabled = state.busy;
+        clearButton.addEventListener("click", () => clearRenewal(account.account_key));
+
+        renewalTools.append(renewalInput, saveButton, clearButton);
+        renewalRow.append(renewalSummaryEl, renewalTools);
+
+        tile.append(header, usageGrid, foot, renewalRow);
         accountsEl.appendChild(tile);
       }
     }
@@ -1096,6 +1305,7 @@ enum WebControlPage {
       activeLineEl.textContent = active ? `当前账号：${active.label}` : "同步本地状态，然后切换到下一个账号。";
       renderMetaLine(active);
       renderPreferences();
+      renderAPIConfig();
       renderStatusMetrics();
       renderAccounts();
       syncControls();
@@ -1155,17 +1365,101 @@ enum WebControlPage {
       }
     }
 
+    async function saveAPIConfig(changes) {
+      state.apiBusy = true;
+      syncControls();
+      setStatus("正在保存风险开关", "neutral");
+      try {
+        const { payload } = await api("/api/api-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(changes)
+        });
+        state.api = payload;
+        render();
+        setStatus("风险开关已更新。", "success");
+      } catch (error) {
+        setStatus(error.message || "保存风险开关失败", "error");
+      } finally {
+        state.apiBusy = false;
+        render();
+      }
+    }
+
+    async function setRenewal(accountKey, date) {
+      if (!date) {
+        setStatus("请先选择一个续费日期。", "warning");
+        return;
+      }
+      state.busy = true;
+      syncControls();
+      setStatus("正在保存续费日期", "neutral");
+      try {
+        const { payload } = await api("/api/renewal/set", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_key: accountKey, date })
+        });
+        render(payload);
+        setStatus("续费日期已保存。", "success");
+      } catch (error) {
+        setStatus(error.message || "保存续费日期失败", "error");
+      } finally {
+        state.busy = false;
+        render();
+      }
+    }
+
+    async function clearRenewal(accountKey) {
+      state.busy = true;
+      syncControls();
+      setStatus("正在清除续费日期", "neutral");
+      try {
+        const { payload } = await api("/api/renewal/clear", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_key: accountKey })
+        });
+        render(payload);
+        setStatus("续费日期已清除。", "success");
+      } catch (error) {
+        setStatus(error.message || "清除续费日期失败", "error");
+      } finally {
+        state.busy = false;
+        render();
+      }
+    }
+
     async function load(mode = "state") {
       state.busy = true;
       syncControls();
       const syncingLocalUsage = mode === "refreshCurrent";
-      setStatus(syncingLocalUsage ? "正在同步本地额度" : "正在同步账号状态", "neutral");
+      const syncingAllUsage = mode === "refreshAll";
+      setStatus(
+        syncingAllUsage ? "正在刷新全部额度" :
+        syncingLocalUsage ? "正在同步本地额度" :
+        "正在同步账号状态",
+        "neutral"
+      );
       try {
-        const { payload } = syncingLocalUsage
-          ? await api("/api/refresh-active", { method: "POST" })
-          : await api("/api/state");
+        const { payload } = syncingAllUsage
+          ? await api("/api/refresh-all", { method: "POST" })
+          : syncingLocalUsage
+            ? await api("/api/refresh-active", { method: "POST" })
+            : await api("/api/state");
         render(payload);
-        if (syncingLocalUsage) {
+        if (syncingAllUsage) {
+          if (!payload || !payload.api || payload.api.usage === false || (payload.refresh && payload.refresh.local_only_mode)) {
+            setStatus("全部额度刷新需要先开启额度 API。", "warning");
+          } else if (payload.refresh && payload.refresh.failed === payload.refresh.attempted && payload.refresh.attempted > 0) {
+            setStatus("全部额度刷新失败，请检查 Node.js 或账号登录态。", "warning");
+          } else {
+            setStatus(
+              `全部额度刷新完成：${payload.refresh.updated} 个已更新，${payload.refresh.failed} 个失败。`,
+              payload.refresh.failed > 0 ? "warning" : "success"
+            );
+          }
+        } else if (syncingLocalUsage) {
           if (payload && payload.refresh && (payload.refresh.local_only_mode || (payload.api && payload.api.usage === false))) {
             const active = payload && payload.accounts
               ? payload.accounts.find((account) => account.active)
@@ -1180,9 +1474,14 @@ enum WebControlPage {
             const active = payload && payload.accounts
               ? payload.accounts.find((account) => account.active)
               : null;
+            const failedUsage = active && active.usage && active.usage.status && active.usage.status !== "ok"
+              ? usageStatusPresentation(active.usage.status)
+              : null;
             setStatus(
-              active ? `本地额度已同步：${active.label}` : "本地额度已同步。",
-              "success"
+              failedUsage
+                ? `当前账号额度刷新失败：${failedUsage.summary}`
+                : (active ? `本地额度已同步：${active.label}` : "本地额度已同步。"),
+              failedUsage ? "warning" : "success"
             );
           }
         } else {
@@ -1270,8 +1569,11 @@ enum WebControlPage {
     scanCPAEl.addEventListener("click", () => startImport("cpa_default", "正在扫描默认 CPA 目录"));
     reloadEl.addEventListener("click", () => load("state"));
     refreshCurrentEl.addEventListener("click", () => load("refreshCurrent"));
+    refreshAllEl.addEventListener("click", () => load("refreshAll"));
     restartToggleEl.addEventListener("change", () => savePreferences(restartToggleEl.checked));
-
+    usageApiToggleEl.addEventListener("change", () => saveAPIConfig({
+      usage_account_enabled: usageApiToggleEl.checked
+    }));
     render();
     Promise.all([loadPreferences(), loadHealth()]).finally(() => load("state"));
   </script>

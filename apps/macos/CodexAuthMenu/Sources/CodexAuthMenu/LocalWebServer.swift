@@ -145,12 +145,22 @@ final class LocalWebServer {
                     restartCodexAfterSwitch: CodexMenuPreferences.restartCodexAfterSwitch(userDefaults: userDefaults)
                 ))
                 send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("GET", "/api/api-config"):
+                let state = try cliClient.loadState(refreshScope: .none)
+                let body = try jsonData(state.api)
+                send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("GET", "/api/state"):
                 let state = try cliClient.loadState(refreshScope: .none)
                 let body = try jsonData(state)
                 send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("POST", "/api/refresh-active"):
                 let state = try cliClient.loadState(refreshScope: .activeOnly)
+                onStateChanged?()
+                let body = try jsonData(state)
+                send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("POST", "/api/refresh-all"):
+                let state = try cliClient.loadState(refreshScope: .allAccounts)
+                onStateChanged?()
                 let body = try jsonData(state)
                 send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("POST", "/api/login"):
@@ -182,6 +192,26 @@ final class LocalWebServer {
                     restartCodexAfterSwitch: request.restartCodexAfterSwitch
                 ))
                 send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("POST", "/api/api-config"):
+                let request = try JSONDecoder().decode(APIConfigRequest.self, from: request.body)
+                let api = try cliClient.setAPIConfig(
+                    usageAccountEnabled: request.usageAccountEnabled
+                )
+                onStateChanged?()
+                let body = try jsonData(api)
+                send(status: 200, contentType: "application/json", body: body, on: connection)
+            case ("POST", "/api/renewal/set"):
+                let body = try JSONDecoder().decode(RenewalSetRequest.self, from: request.body)
+                let state = try cliClient.setRenewal(accountKey: body.accountKey, date: body.date)
+                onStateChanged?()
+                let response = try jsonData(state)
+                send(status: 200, contentType: "application/json", body: response, on: connection)
+            case ("POST", "/api/renewal/clear"):
+                let body = try JSONDecoder().decode(RenewalClearRequest.self, from: request.body)
+                let state = try cliClient.clearRenewal(accountKey: body.accountKey)
+                onStateChanged?()
+                let response = try jsonData(state)
+                send(status: 200, contentType: "application/json", body: response, on: connection)
             case ("POST", "/api/switch"):
                 let body = try JSONDecoder().decode(SwitchRequest.self, from: request.body)
                 let state = try cliClient.switchAccount(accountKey: body.accountKey)
@@ -385,6 +415,32 @@ private struct PreferencesRequest: Codable {
 
     enum CodingKeys: String, CodingKey {
         case restartCodexAfterSwitch = "restart_codex_after_switch"
+    }
+}
+
+private struct APIConfigRequest: Codable {
+    var usageAccountEnabled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case usageAccountEnabled = "usage_account_enabled"
+    }
+}
+
+private struct RenewalSetRequest: Codable {
+    var accountKey: String
+    var date: String
+
+    enum CodingKeys: String, CodingKey {
+        case accountKey = "account_key"
+        case date
+    }
+}
+
+private struct RenewalClearRequest: Codable {
+    var accountKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case accountKey = "account_key"
     }
 }
 

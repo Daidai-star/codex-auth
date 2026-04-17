@@ -8,7 +8,9 @@ const c_time = @cImport({
 
 pub const PlanType = enum { free, plus, prolite, pro, team, business, enterprise, edu, unknown };
 pub const AuthMode = enum { chatgpt, apikey };
-pub const current_schema_version: u32 = 3;
+pub const RenewalSource = enum { manual, auto };
+pub const RenewalStatus = enum { ok, missing, unsupported, fetch_failed };
+pub const current_schema_version: u32 = 4;
 pub const min_supported_schema_version: u32 = 2;
 pub const default_auto_switch_threshold_5h_percent: u8 = 10;
 pub const default_auto_switch_threshold_weekly_percent: u8 = 5;
@@ -53,14 +55,23 @@ pub const AutoSwitchConfig = struct {
 };
 
 pub const ApiConfig = struct {
-    usage: bool = true,
-    account: bool = true,
+    usage: bool = false,
+    account: bool = false,
+    renewal: bool = false,
 };
 
 const ApiConfigParseResult = struct {
     has_object: bool = false,
     has_usage: bool = false,
     has_account: bool = false,
+    has_renewal: bool = false,
+};
+
+pub const RenewalInfo = struct {
+    next_renewal_at: ?[]u8 = null,
+    source: ?RenewalSource = null,
+    updated_at: ?i64 = null,
+    status: RenewalStatus = .missing,
 };
 
 pub const AccountRecord = struct {
@@ -77,6 +88,7 @@ pub const AccountRecord = struct {
     last_usage: ?RateLimitSnapshot,
     last_usage_at: ?i64,
     last_local_rollout: ?RolloutSignature,
+    renewal: RenewalInfo = .{},
 };
 
 pub fn resolvePlan(rec: *const AccountRecord) ?PlanType {
@@ -135,6 +147,7 @@ fn freeAccountRecord(allocator: std.mem.Allocator, rec: *const AccountRecord) vo
     if (rec.last_usage) |*u| {
         freeRateLimitSnapshot(allocator, u);
     }
+    freeRenewalInfo(allocator, &rec.renewal);
 }
 
 pub fn freeRateLimitSnapshot(allocator: std.mem.Allocator, snapshot: *const RateLimitSnapshot) void {
@@ -253,6 +266,26 @@ fn optionalStringEqual(a: ?[]const u8, b: ?[]const u8) bool {
 
 fn cloneOptionalStringAlloc(allocator: std.mem.Allocator, value: ?[]const u8) !?[]u8 {
     return if (value) |text| try allocator.dupe(u8, text) else null;
+}
+
+fn freeRenewalInfo(allocator: std.mem.Allocator, renewal: *const RenewalInfo) void {
+    if (renewal.next_renewal_at) |date| allocator.free(date);
+}
+
+fn cloneRenewalInfo(allocator: std.mem.Allocator, renewal: RenewalInfo) !RenewalInfo {
+    return .{
+        .next_renewal_at = if (renewal.next_renewal_at) |date| try allocator.dupe(u8, date) else null,
+        .source = renewal.source,
+        .updated_at = renewal.updated_at,
+        .status = renewal.status,
+    };
+}
+
+fn renewalInfoIsEmpty(renewal: RenewalInfo) bool {
+    return renewal.next_renewal_at == null and
+        renewal.source == null and
+        renewal.updated_at == null and
+        renewal.status == .missing;
 }
 
 fn replaceOptionalStringAlloc(
@@ -1611,6 +1644,62 @@ pub fn updateUsage(allocator: std.mem.Allocator, reg: *Registry, account_key: []
     }
 }
 
+fn setRenewalDateAlloc(
+    allocator: std.mem.Allocator,
+    renewal: *RenewalInfo,
+    next_renewal_at: ?[]const u8,
+) !void {
+    const replacement = if (next_renewal_at) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (replacement) |value| allocator.free(value);
+    if (renewal.next_renewal_at) |existing| allocator.free(existing);
+    renewal.next_renewal_at = replacement;
+}
+
+fn accountByKey(reg: *Registry, account_key: []const u8) !*AccountRecord {
+    const idx = findAccountIndexByAccountKey(reg, account_key) orelse return error.AccountNotFound;
+    return &reg.accounts.items[idx];
+}
+
+pub fn setAccountRenewal(
+    allocator: std.mem.Allocator,
+    reg: *Registry,
+    account_key: []const u8,
+    next_renewal_at: []const u8,
+    source: RenewalSource,
+    status: RenewalStatus,
+) !void {
+    var rec = try accountByKey(reg, account_key);
+    try setRenewalDateAlloc(allocator, &rec.renewal, next_renewal_at);
+    rec.renewal.source = source;
+    rec.renewal.status = status;
+    rec.renewal.updated_at = std.time.timestamp();
+}
+
+pub fn clearAccountRenewal(
+    allocator: std.mem.Allocator,
+    reg: *Registry,
+    account_key: []const u8,
+) !void {
+    var rec = try accountByKey(reg, account_key);
+    try setRenewalDateAlloc(allocator, &rec.renewal, null);
+    rec.renewal.source = null;
+    rec.renewal.status = .missing;
+    rec.renewal.updated_at = std.time.timestamp();
+}
+
+pub fn markAccountRenewalStatus(
+    reg: *Registry,
+    account_key: []const u8,
+    status: RenewalStatus,
+) !void {
+    var rec = try accountByKey(reg, account_key);
+    rec.renewal.status = status;
+    rec.renewal.updated_at = std.time.timestamp();
+    if (status == .missing and rec.renewal.next_renewal_at == null) {
+        rec.renewal.source = null;
+    }
+}
+
 pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []const u8, reg: *Registry) !bool {
     if (reg.accounts.items.len == 0) {
         return try autoImportActiveAuth(allocator, codex_home, reg);
@@ -1998,6 +2087,9 @@ fn mergeAccountRecord(allocator: std.mem.Allocator, dest: *AccountRecord, incomi
         if (merged_incoming.account_name == null and dest.account_name != null) {
             merged_incoming.account_name = cloneOptionalStringAlloc(allocator, dest.account_name) catch unreachable;
         }
+        if (renewalInfoIsEmpty(merged_incoming.renewal) and !renewalInfoIsEmpty(dest.renewal)) {
+            merged_incoming.renewal = cloneRenewalInfo(allocator, dest.renewal) catch unreachable;
+        }
         freeAccountRecord(allocator, dest);
         dest.* = merged_incoming;
         return;
@@ -2009,6 +2101,9 @@ fn mergeAccountRecord(allocator: std.mem.Allocator, dest: *AccountRecord, incomi
     }
     if (dest.account_name == null and merged_incoming.account_name != null) {
         dest.account_name = cloneOptionalStringAlloc(allocator, merged_incoming.account_name) catch unreachable;
+    }
+    if (renewalInfoIsEmpty(dest.renewal) and !renewalInfoIsEmpty(merged_incoming.renewal)) {
+        dest.renewal = cloneRenewalInfo(allocator, merged_incoming.renewal) catch unreachable;
     }
     if (dest.plan == null) dest.plan = merged_incoming.plan;
     if (dest.auth_mode == null) dest.auth_mode = merged_incoming.auth_mode;
@@ -2130,6 +2225,7 @@ fn parseAccountRecord(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Ac
         .last_usage = null,
         .last_usage_at = readInt(obj.get("last_usage_at")),
         .last_local_rollout = null,
+        .renewal = .{},
     };
     errdefer freeAccountRecord(allocator, &rec);
 
@@ -2150,6 +2246,9 @@ fn parseAccountRecord(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Ac
     }
     if (obj.get("last_local_rollout")) |v| {
         rec.last_local_rollout = parseRolloutSignature(allocator, v);
+    }
+    if (obj.get("renewal")) |v| {
+        rec.renewal = parseRenewalInfo(allocator, v);
     }
     return rec;
 }
@@ -2419,6 +2518,20 @@ fn currentLayoutNeedsRewrite(root_obj: std.json.ObjectMap) bool {
     } else {
         return true;
     }
+    if (root_obj.get("accounts")) |value| {
+        switch (value) {
+            .array => |accounts| {
+                for (accounts.items) |item| {
+                    const obj = switch (item) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    if (obj.get("renewal") == null) return true;
+                }
+            },
+            else => {},
+        }
+    }
     return root_obj.get("active_account_key") != null and root_obj.get("active_account_activated_at_ms") == null;
 }
 
@@ -2473,6 +2586,7 @@ pub fn loadRegistry(allocator: std.mem.Allocator, codex_home: []const u8) !Regis
     var reg = switch (schema_version) {
         2 => try loadLegacyRegistryV2(allocator, codex_home, root_obj),
         3 => try loadCurrentRegistry(allocator, root_obj),
+        4 => try loadCurrentRegistry(allocator, root_obj),
         else => {
             std.log.err(
                 "registry schema_version {d} is older than the minimum supported {d}; use an intermediate codex-auth release or import --purge",
@@ -2482,6 +2596,13 @@ pub fn loadRegistry(allocator: std.mem.Allocator, codex_home: []const u8) !Regis
         },
     };
     errdefer reg.deinit(allocator);
+
+    if (schema_version < current_schema_version) {
+        reg.api = defaultApiConfig();
+        for (reg.accounts.items) |*rec| {
+            normalizeRenewalInfo(&rec.renewal);
+        }
+    }
 
     if (needs_rewrite) {
         try saveRegistry(allocator, codex_home, &reg);
@@ -2574,6 +2695,12 @@ const RegistryOut = struct {
     accounts: []const AccountRecord,
 };
 
+const RenewalDate = struct {
+    year: i32,
+    month: u8,
+    day: u8,
+};
+
 fn parsePlanType(s: []const u8) ?PlanType {
     if (std.mem.eql(u8, s, "free")) return .free;
     if (std.mem.eql(u8, s, "plus")) return .plus;
@@ -2589,6 +2716,20 @@ fn parsePlanType(s: []const u8) ?PlanType {
 fn parseAuthMode(s: []const u8) ?AuthMode {
     if (std.mem.eql(u8, s, "chatgpt")) return .chatgpt;
     if (std.mem.eql(u8, s, "apikey")) return .apikey;
+    return null;
+}
+
+fn parseRenewalSource(s: []const u8) ?RenewalSource {
+    if (std.mem.eql(u8, s, "manual")) return .manual;
+    if (std.mem.eql(u8, s, "auto")) return .auto;
+    return null;
+}
+
+fn parseRenewalStatus(s: []const u8) ?RenewalStatus {
+    if (std.mem.eql(u8, s, "ok")) return .ok;
+    if (std.mem.eql(u8, s, "missing")) return .missing;
+    if (std.mem.eql(u8, s, "unsupported")) return .unsupported;
+    if (std.mem.eql(u8, s, "fetch_failed")) return .fetch_failed;
     return null;
 }
 
@@ -2609,6 +2750,45 @@ fn parseUsage(allocator: std.mem.Allocator, v: std.json.Value) ?RateLimitSnapsho
     if (obj.get("secondary")) |p| snap.secondary = parseWindow(p);
     if (obj.get("credits")) |c| snap.credits = parseCredits(allocator, c);
     return snap;
+}
+
+fn parseRenewalInfo(allocator: std.mem.Allocator, v: std.json.Value) RenewalInfo {
+    const obj = switch (v) {
+        .object => |o| o,
+        else => return .{},
+    };
+
+    var renewal: RenewalInfo = .{};
+    if (obj.get("next_renewal_at")) |value| {
+        renewal.next_renewal_at = parseOptionalStoredStringAlloc(allocator, value) catch null;
+        if (renewal.next_renewal_at) |date| {
+            if (parseRenewalDate(date) == null) {
+                allocator.free(date);
+                renewal.next_renewal_at = null;
+            }
+        }
+    }
+    if (obj.get("source")) |value| {
+        switch (value) {
+            .string => |text| renewal.source = parseRenewalSource(text),
+            else => {},
+        }
+    }
+    if (obj.get("updated_at")) |value| {
+        renewal.updated_at = readInt(value);
+    }
+    if (obj.get("status")) |value| {
+        switch (value) {
+            .string => |text| {
+                if (parseRenewalStatus(text)) |status| {
+                    renewal.status = status;
+                }
+            },
+            else => {},
+        }
+    }
+    normalizeRenewalInfo(&renewal);
+    return renewal;
 }
 
 fn parseAutoSwitch(allocator: std.mem.Allocator, cfg: *AutoSwitchConfig, v: std.json.Value) void {
@@ -2642,7 +2822,7 @@ fn parseApiConfig(cfg: *ApiConfig, v: std.json.Value) void {
 fn apiConfigNeedsRewrite(v: std.json.Value) bool {
     var cfg = defaultApiConfig();
     const result = parseApiConfigDetailed(&cfg, v);
-    return !result.has_object or !result.has_usage or !result.has_account;
+    return !result.has_object or !result.has_usage or !result.has_account or !result.has_renewal;
 }
 
 fn parseApiConfigDetailed(cfg: *ApiConfig, v: std.json.Value) ApiConfigParseResult {
@@ -2669,12 +2849,126 @@ fn parseApiConfigDetailed(cfg: *ApiConfig, v: std.json.Value) ApiConfigParseResu
             else => {},
         }
     }
+    if (obj.get("renewal")) |renewal| {
+        switch (renewal) {
+            .bool => |flag| {
+                cfg.renewal = flag;
+                result.has_renewal = true;
+            },
+            else => {},
+        }
+    }
     if (result.has_usage and !result.has_account) {
         cfg.account = cfg.usage;
     } else if (result.has_account and !result.has_usage) {
         cfg.usage = cfg.account;
     }
     return result;
+}
+
+fn normalizeRenewalInfo(renewal: *RenewalInfo) void {
+    if (renewal.next_renewal_at == null) {
+        if (renewal.status == .ok) renewal.status = .missing;
+        if (renewal.status == .missing) {
+            renewal.source = null;
+        }
+    } else if (renewal.source == null and renewal.status == .ok) {
+        renewal.source = .manual;
+    }
+}
+
+fn isLeapYear(year: i32) bool {
+    if (@mod(year, 400) == 0) return true;
+    if (@mod(year, 100) == 0) return false;
+    return @mod(year, 4) == 0;
+}
+
+fn daysInMonth(year: i32, month: u8) ?u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => null,
+    };
+}
+
+fn parseRenewalDate(text: []const u8) ?RenewalDate {
+    if (text.len != 10 or text[4] != '-' or text[7] != '-') return null;
+    const year = std.fmt.parseInt(i32, text[0..4], 10) catch return null;
+    const month = std.fmt.parseInt(u8, text[5..7], 10) catch return null;
+    const day = std.fmt.parseInt(u8, text[8..10], 10) catch return null;
+    const max_day = daysInMonth(year, month) orelse return null;
+    if (day < 1 or day > max_day) return null;
+    return .{ .year = year, .month = month, .day = day };
+}
+
+pub fn renewalDateStringIsValid(text: []const u8) bool {
+    return parseRenewalDate(text) != null;
+}
+
+fn renewalDateLessThan(lhs: RenewalDate, rhs: RenewalDate) bool {
+    if (lhs.year != rhs.year) return lhs.year < rhs.year;
+    if (lhs.month != rhs.month) return lhs.month < rhs.month;
+    return lhs.day < rhs.day;
+}
+
+fn formatRenewalDateAlloc(allocator: std.mem.Allocator, date: RenewalDate) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{
+        date.year,
+        date.month,
+        date.day,
+    });
+}
+
+fn todayLocalRenewalDate() ?RenewalDate {
+    var tm: c_time.struct_tm = undefined;
+    if (!localtimeCompat(std.time.timestamp(), &tm)) return null;
+    return .{
+        .year = @intCast(tm.tm_year + 1900),
+        .month = @intCast(tm.tm_mon + 1),
+        .day = @intCast(tm.tm_mday),
+    };
+}
+
+fn advanceRenewalDateByMonth(date: RenewalDate) RenewalDate {
+    var year = date.year;
+    var month = date.month + 1;
+    if (month > 12) {
+        month = 1;
+        year += 1;
+    }
+    const max_day = daysInMonth(year, month) orelse date.day;
+    return .{
+        .year = year,
+        .month = month,
+        .day = @min(date.day, max_day),
+    };
+}
+
+pub fn nextMonthlyRenewalDateAlloc(
+    allocator: std.mem.Allocator,
+    current_date_text: []const u8,
+) !?[]u8 {
+    var date = parseRenewalDate(current_date_text) orelse return null;
+    const today = todayLocalRenewalDate() orelse return null;
+    while (renewalDateLessThan(date, today)) {
+        date = advanceRenewalDateByMonth(date);
+    }
+    return try formatRenewalDateAlloc(allocator, date);
+}
+
+pub fn renewalPlanSupportsAutomaticRefresh(plan: ?PlanType) bool {
+    return switch (plan orelse return false) {
+        .plus, .prolite, .pro => true,
+        else => false,
+    };
+}
+
+pub fn renewalPlanIsUnsupported(plan: ?PlanType) bool {
+    return switch (plan orelse return false) {
+        .free, .team, .business, .enterprise, .edu => true,
+        else => false,
+    };
 }
 
 fn parseRolloutSignature(allocator: std.mem.Allocator, v: std.json.Value) ?RolloutSignature {

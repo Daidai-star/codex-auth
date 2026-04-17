@@ -540,6 +540,83 @@ test "Scenario: Given config api disable when parsing then api disable action is
     }
 }
 
+test "Scenario: Given config api renewal enable when parsing then usage error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "config", "api", "renewal", "enable" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .config, "requires `enable` or `disable`");
+}
+
+test "Scenario: Given renewal set when parsing then renewal set options are preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{
+        "codex-auth",
+        "renewal",
+        "set",
+        "--account-key",
+        "user::acct",
+        "--date",
+        "2026-05-01",
+        "--json",
+    };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .renewal => |opts| switch (opts) {
+                .set => |set_opts| {
+                    try std.testing.expectEqualStrings("user::acct", set_opts.account_key);
+                    try std.testing.expectEqualStrings("2026-05-01", set_opts.date);
+                    try std.testing.expect(set_opts.json);
+                },
+                else => return error.TestExpectedEqual,
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given renewal clear when parsing then renewal clear options are preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{
+        "codex-auth",
+        "renewal",
+        "clear",
+        "--account-key",
+        "user::acct",
+        "--json",
+    };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .renewal => |opts| switch (opts) {
+                .clear => |clear_opts| {
+                    try std.testing.expectEqualStrings("user::acct", clear_opts.account_key);
+                    try std.testing.expect(clear_opts.json);
+                },
+                else => return error.TestExpectedEqual,
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given renewal refresh when parsing then unknown action error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "renewal", "refresh" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .renewal, "unknown action `refresh`");
+}
+
 test "Scenario: Given config auto action mixed with threshold flags when parsing then usage error is returned" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "config", "auto", "enable", "--5h", "12" };

@@ -761,7 +761,7 @@ pub fn handleAutoCommand(allocator: std.mem.Allocator, codex_home: []const u8, c
     }
 }
 
-pub fn handleApiCommand(allocator: std.mem.Allocator, codex_home: []const u8, action: cli.ApiAction) !void {
+pub fn handleApiCommand(allocator: std.mem.Allocator, codex_home: []const u8, action: cli.ApiCommand) !void {
     var reg = try registry.loadRegistry(allocator, codex_home);
     defer reg.deinit(allocator);
     const enabled = action == .enable;

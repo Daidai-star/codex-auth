@@ -24,7 +24,7 @@ final class CodexAuthMenuTests: XCTestCase {
                 "HOME": tempRoot.path,
                 "PATH": binDir.path
             ],
-            shellResolver: { _ in nil }
+            shellResolver: { _, _ in nil }
         )
 
         XCTAssertEqual(resolved, executable.path)
@@ -57,7 +57,7 @@ final class CodexAuthMenuTests: XCTestCase {
                 "HOME": tempRoot.path,
                 "PATH": binDir.path,
             ],
-            shellResolver: { _ in nil }
+            shellResolver: { _, _ in nil }
         )
 
         XCTAssertEqual(resolved, bundledExecutable.path)
@@ -69,7 +69,7 @@ final class CodexAuthMenuTests: XCTestCase {
             preferredPath: nil,
             environment: [:],
             isExecutable: { _ in false },
-            shellResolver: { _ in nil }
+            shellResolver: { _, _ in nil }
         )
 
         XCTAssertThrowsError(try client.loadState(refreshScope: .none)) { error in
@@ -85,7 +85,7 @@ final class CodexAuthMenuTests: XCTestCase {
             commandRunner: { _, _, _ in
                 CommandResult(stdout: Data(), stderr: Data("boom".utf8), status: 1)
             },
-            shellResolver: { _ in nil }
+            shellResolver: { _, _ in nil }
         )
 
         XCTAssertThrowsError(try client.loadState(refreshScope: .none)) { error in
@@ -124,12 +124,83 @@ final class CodexAuthMenuTests: XCTestCase {
                 }
                 return CommandResult(stdout: Data(), stderr: Data("unexpected".utf8), status: 1)
             },
-            shellResolver: { _ in nil }
+            shellResolver: { _, _ in nil }
         )
 
         let state = try client.loadState(refreshScope: .activeOnly)
         XCTAssertFalse(state.api.usage)
         XCTAssertTrue(state.refresh.localOnlyMode)
+    }
+
+    func testCLIClientInjectsNodeExecutableFromUserNVMDirectory() throws {
+        let tempRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let nodeDir = tempRoot
+            .appendingPathComponent(".nvm", isDirectory: true)
+            .appendingPathComponent("versions", isDirectory: true)
+            .appendingPathComponent("node", isDirectory: true)
+            .appendingPathComponent("v24.13.1", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: nodeDir, withIntermediateDirectories: true)
+
+        let nodeExecutable = nodeDir.appendingPathComponent("node")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: nodeExecutable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: nodeExecutable.path
+        )
+
+        let client = CLIClient(
+            executablePath: "/mock/codex-auth",
+            preferredPath: nil,
+            environment: [
+                "HOME": tempRoot.path,
+                "PATH": "/usr/bin:/bin",
+            ],
+            commandRunner: { _, args, environment in
+                XCTAssertEqual(args, ["list", "--json"])
+                XCTAssertEqual(environment["CODEX_AUTH_NODE_EXECUTABLE"], nodeExecutable.path)
+                XCTAssertTrue((environment["PATH"] ?? "").contains(nodeDir.path))
+                return Self.makeStateCommandResult(activeKey: "acct-primary")
+            },
+            shellResolver: { _, _ in nil }
+        )
+
+        _ = try client.loadState(refreshScope: .none)
+    }
+
+    func testAccountUsageAndRenewalCopyUsesFriendlyText() {
+        let usageAccount = Account(
+            accountKey: "acct-error",
+            label: "错误账号",
+            email: "error@example.com",
+            alias: "",
+            accountName: nil,
+            plan: "Plus",
+            authMode: "chatgpt",
+            active: true,
+            lastUsedAt: 1713200000,
+            lastUsageAt: 1713200000,
+            usage: UsageSnapshot(
+                status: "NodeJsRequired",
+                fiveHour: nil,
+                weekly: nil,
+                credits: nil
+            ),
+            renewal: RenewalSnapshot(
+                nextRenewalAt: nil,
+                source: nil,
+                updatedAt: nil,
+                status: "fetch_failed"
+            )
+        )
+
+        XCTAssertEqual(usageAccount.menuUsageSummary, "5 小时 需要 Node · 每周 需要 Node")
+        XCTAssertTrue(usageAccount.menuUsageDetail.contains("Node.js 18+"))
+        XCTAssertEqual(usageAccount.usageLine, "额度刷新状态：需要本机 Node.js 18+")
+        XCTAssertEqual(usageAccount.renewalSummary, "下次续费：未设置")
+        XCTAssertTrue(usageAccount.renewalDetail.contains("手动记录一个日期"))
     }
 
     func testLocalWebServerStateRefreshSwitchAndHealth() async throws {
@@ -241,6 +312,75 @@ final class CodexAuthMenuTests: XCTestCase {
             try JSONDecoder().decode(ErrorPayload.self, from: failure.body).error,
             "codex-auth 执行失败：boom"
         )
+    }
+
+    func testLocalWebServerAPIConfigRefreshAllAndManualRenewalEndpoints() async throws {
+        let tempRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let mock = AdvancedMockCLI()
+        let client = makeClient(home: tempRoot) { executablePath, args, environment in
+            try mock.run(executablePath, args, environment)
+        }
+        let server = LocalWebServer(cliClient: client)
+        defer { server.stop() }
+
+        try server.start()
+        let controlURL = try waitForControlURL(server)
+        let token = try XCTUnwrap(Self.token(from: controlURL))
+
+        let initialConfig = try await request(
+            baseURL: controlURL,
+            path: "/api/api-config",
+            token: token
+        )
+        XCTAssertEqual(initialConfig.statusCode, 200)
+        XCTAssertFalse(try JSONDecoder().decode(ApiConfig.self, from: initialConfig.body).usage)
+
+        let enabledUsage = try await request(
+            baseURL: controlURL,
+            path: "/api/api-config",
+            token: token,
+            method: "POST",
+            body: Data(#"{"usage_account_enabled":true}"#.utf8)
+        )
+        XCTAssertEqual(enabledUsage.statusCode, 200)
+        XCTAssertTrue(try JSONDecoder().decode(ApiConfig.self, from: enabledUsage.body).usage)
+
+        let refreshAll = try await request(
+            baseURL: controlURL,
+            path: "/api/refresh-all",
+            token: token,
+            method: "POST"
+        )
+        XCTAssertEqual(refreshAll.statusCode, 200)
+        let refreshedState = try JSONDecoder().decode(CodexState.self, from: refreshAll.body)
+        XCTAssertEqual(refreshedState.refresh.attempted, 2)
+        XCTAssertEqual(refreshedState.refresh.updated, 2)
+
+        let setRenewal = try await request(
+            baseURL: controlURL,
+            path: "/api/renewal/set",
+            token: token,
+            method: "POST",
+            body: Data(#"{"account_key":"acct-primary","date":"2026-06-15"}"#.utf8)
+        )
+        XCTAssertEqual(setRenewal.statusCode, 200)
+        let setState = try JSONDecoder().decode(CodexState.self, from: setRenewal.body)
+        XCTAssertEqual(setState.activeAccount?.renewal.nextRenewalAt, "2026-06-15")
+        XCTAssertEqual(setState.activeAccount?.renewal.status, "ok")
+
+        let clearedRenewal = try await request(
+            baseURL: controlURL,
+            path: "/api/renewal/clear",
+            token: token,
+            method: "POST",
+            body: Data(#"{"account_key":"acct-primary"}"#.utf8)
+        )
+        XCTAssertEqual(clearedRenewal.statusCode, 200)
+        let clearedState = try JSONDecoder().decode(CodexState.self, from: clearedRenewal.body)
+        XCTAssertNil(clearedState.activeAccount?.renewal.nextRenewalAt)
+        XCTAssertEqual(clearedState.activeAccount?.renewal.status, "missing")
     }
 
     func testLocalWebServerPreferencesLoginAndRestartHeader() async throws {
@@ -417,7 +557,7 @@ final class CodexAuthMenuTests: XCTestCase {
                 "HOME": home.path
             ],
             commandRunner: runner,
-            shellResolver: { _ in nil }
+            shellResolver: { _, _ in nil }
         )
     }
 
@@ -541,6 +681,162 @@ private final class MockCLI: @unchecked Sendable {
     }
 }
 
+private final class AdvancedMockCLI: @unchecked Sendable {
+    private let lock = NSLock()
+    private var apiUsageEnabled = false
+    private var primaryRenewalDate: String? = "2026-05-01"
+
+    func run(_ executablePath: String, _ args: [String], _ environment: [String: String]) throws -> CommandResult {
+        lock.lock()
+        defer { lock.unlock() }
+        _ = executablePath
+        _ = environment
+
+        if args == ["--version"] {
+            return CommandResult(stdout: Data("codex-auth 1.0.1-alpha.1\n".utf8), stderr: Data(), status: 0)
+        }
+        if args == ["list", "--json"] {
+            return state()
+        }
+        if args == ["list", "--json", "--refresh-usage"] {
+            return state(usageRequested: true, attempted: 2, updated: apiUsageEnabled ? 2 : 0, localOnlyMode: !apiUsageEnabled)
+        }
+        if args == ["config", "api", "enable"] {
+            apiUsageEnabled = true
+            return CommandResult(stdout: Data(), stderr: Data(), status: 0)
+        }
+        if args == ["config", "api", "disable"] {
+            apiUsageEnabled = false
+            return CommandResult(stdout: Data(), stderr: Data(), status: 0)
+        }
+        if args == ["renewal", "set", "--account-key", "acct-primary", "--date", "2026-06-15", "--json"] {
+            primaryRenewalDate = "2026-06-15"
+            return state(primaryRenewalSource: "manual", primaryRenewalStatus: "ok")
+        }
+        if args == ["renewal", "clear", "--account-key", "acct-primary", "--json"] {
+            primaryRenewalDate = nil
+            return state(primaryRenewalSource: nil, primaryRenewalStatus: "missing")
+        }
+
+        return CommandResult(
+            stdout: Data(),
+            stderr: Data("unexpected args: \(args.joined(separator: " "))".utf8),
+            status: 1
+        )
+    }
+
+    private func state(
+        usageRequested: Bool = false,
+        attempted: Int = 0,
+        updated: Int = 0,
+        localOnlyMode: Bool = false,
+        primaryRenewalSource: String? = "manual",
+        primaryRenewalStatus: String = "ok"
+    ) -> CommandResult {
+        let primaryRenewalDateJSON = primaryRenewalDate.map { "\"\($0)\"" } ?? "null"
+        let primaryRenewalSourceJSON = primaryRenewalSource.map { "\"\($0)\"" } ?? "null"
+        let json = """
+        {
+          "schema_version": 4,
+          "codex_home": "/tmp/mock-codex",
+          "active_account_key": "acct-primary",
+          "api": {
+            "usage": \(apiUsageEnabled),
+            "account": \(apiUsageEnabled),
+            "renewal": false
+          },
+          "accounts": [
+            {
+              "account_key": "acct-primary",
+              "label": "主账号",
+              "email": "primary@example.com",
+              "alias": "personal",
+              "account_name": "Primary",
+              "plan": "Plus",
+              "auth_mode": "chatgpt",
+              "active": true,
+              "last_used_at": 1713200000,
+              "last_usage_at": 1713200000,
+              "usage": {
+                "status": "ok",
+                "five_hour": {
+                  "used_percent": 10,
+                  "remaining_percent": 90,
+                  "window_minutes": 300,
+                  "resets_at": 1713203600
+                },
+                "weekly": {
+                  "used_percent": 20,
+                  "remaining_percent": 80,
+                  "window_minutes": 10080,
+                  "resets_at": 1713800000
+                },
+                "credits": {
+                  "has_credits": false,
+                  "unlimited": true,
+                  "balance": null
+                }
+              },
+              "renewal": {
+                "next_renewal_at": \(primaryRenewalDateJSON),
+                "source": \(primaryRenewalSourceJSON),
+                "updated_at": 1713200000,
+                "status": "\(primaryRenewalStatus)"
+              }
+            },
+            {
+              "account_key": "acct-secondary",
+              "label": "备用账号",
+              "email": "secondary@example.com",
+              "alias": "backup",
+              "account_name": "Secondary",
+              "plan": "Pro",
+              "auth_mode": "chatgpt",
+              "active": false,
+              "last_used_at": 1713100000,
+              "last_usage_at": 1713100000,
+              "usage": {
+                "status": "ok",
+                "five_hour": {
+                  "used_percent": 30,
+                  "remaining_percent": 70,
+                  "window_minutes": 300,
+                  "resets_at": 1713203600
+                },
+                "weekly": {
+                  "used_percent": 40,
+                  "remaining_percent": 60,
+                  "window_minutes": 10080,
+                  "resets_at": 1713800000
+                },
+                "credits": {
+                  "has_credits": false,
+                  "unlimited": true,
+                  "balance": null
+                }
+              },
+              "renewal": {
+                "next_renewal_at": null,
+                "source": null,
+                "updated_at": null,
+                "status": "missing"
+              }
+            }
+          ],
+          "refresh": {
+            "usage_requested": \(usageRequested),
+            "attempted": \(attempted),
+            "updated": \(updated),
+            "failed": 0,
+            "unchanged": \(usageRequested && updated == 0 && attempted > 0 ? attempted : 0),
+            "local_only_mode": \(localOnlyMode)
+          }
+        }
+        """
+        return CommandResult(stdout: Data(json.utf8), stderr: Data(), status: 0)
+    }
+}
+
 private struct HealthPayload: Decodable {
     var ok: Bool
     var cliPath: String
@@ -584,6 +880,7 @@ private extension CodexAuthMenuTests {
     static func makeStateCommandResult(
         activeKey: String,
         apiUsage: Bool = true,
+        apiRenewal: Bool = false,
         usageRequested: Bool = false,
         attempted: Int = 0,
         updated: Int = 0,
@@ -598,7 +895,8 @@ private extension CodexAuthMenuTests {
           "active_account_key": "\(activeKey)",
           "api": {
             "usage": \(apiUsage),
-            "account": true
+            "account": true,
+            "renewal": \(apiRenewal)
           },
           "accounts": [
             {
@@ -608,7 +906,7 @@ private extension CodexAuthMenuTests {
               "alias": "personal",
               "account_name": "Primary",
               "plan": "Plus",
-              "auth_mode": "oauth",
+              "auth_mode": "chatgpt",
               "active": \(primaryActive),
               "last_used_at": 1713200000,
               "last_usage_at": 1713200000,
@@ -631,6 +929,12 @@ private extension CodexAuthMenuTests {
                   "unlimited": true,
                   "balance": null
                 }
+              },
+              "renewal": {
+                "next_renewal_at": "2026-05-01",
+                "source": "manual",
+                "updated_at": 1713200000,
+                "status": "ok"
               }
             },
             {
@@ -640,7 +944,7 @@ private extension CodexAuthMenuTests {
               "alias": "backup",
               "account_name": "Secondary",
               "plan": "Pro",
-              "auth_mode": "oauth",
+              "auth_mode": "chatgpt",
               "active": \(secondaryActive),
               "last_used_at": 1713100000,
               "last_usage_at": 1713100000,
@@ -663,6 +967,12 @@ private extension CodexAuthMenuTests {
                   "unlimited": true,
                   "balance": null
                 }
+              },
+              "renewal": {
+                "next_renewal_at": null,
+                "source": null,
+                "updated_at": null,
+                "status": "missing"
               }
             }
           ],

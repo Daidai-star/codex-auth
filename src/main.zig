@@ -198,6 +198,34 @@ fn writeUsageJson(
     try out.writeAll("}");
 }
 
+fn renewalSourceJsonLabel(source: ?registry.RenewalSource) ?[]const u8 {
+    return switch (source orelse return null) {
+        .manual => "manual",
+        .auto => "auto",
+    };
+}
+
+fn renewalStatusJsonLabel(status: registry.RenewalStatus) []const u8 {
+    return switch (status) {
+        .ok => "ok",
+        .missing => "missing",
+        .unsupported => "unsupported",
+        .fetch_failed => "fetch_failed",
+    };
+}
+
+fn writeRenewalJson(out: *std.Io.Writer, renewal: registry.RenewalInfo) !void {
+    try out.writeAll("{\"next_renewal_at\":");
+    try writeOptionalJsonString(out, renewal.next_renewal_at);
+    try out.writeAll(",\"source\":");
+    try writeOptionalJsonString(out, renewalSourceJsonLabel(renewal.source));
+    try out.writeAll(",\"updated_at\":");
+    try writeOptionalI64(out, renewal.updated_at);
+    try out.writeAll(",\"status\":");
+    try jsonString(out, renewalStatusJsonLabel(renewal.status));
+    try out.writeAll("}");
+}
+
 fn usageOverrideForAccount(
     usage_overrides: ?[]const ?[]const u8,
     account_idx: usize,
@@ -229,6 +257,8 @@ pub fn writeAccountsJson(
     try writeOptionalBool(out, reg.api.usage);
     try out.writeAll(",\"account\":");
     try writeOptionalBool(out, reg.api.account);
+    try out.writeAll(",\"renewal\":");
+    try writeOptionalBool(out, reg.api.renewal);
     try out.writeAll("},\"accounts\":[");
     for (reg.accounts.items, 0..) |rec, idx| {
         if (idx != 0) try out.writeAll(",");
@@ -259,6 +289,8 @@ pub fn writeAccountsJson(
         try writeOptionalI64(out, rec.last_usage_at);
         try out.writeAll(",\"usage\":");
         try writeUsageJson(out, rec.last_usage, usageOverrideForAccount(usage_overrides, idx), now);
+        try out.writeAll(",\"renewal\":");
+        try writeRenewalJson(out, rec.renewal);
         try out.writeAll("}");
     }
     try out.writeAll("],\"refresh\":{\"usage_requested\":");
@@ -386,6 +418,7 @@ fn runMainArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .login => |opts| try handleLogin(allocator, codex_home.?, opts),
         .import_auth => |opts| try handleImport(allocator, codex_home.?, opts),
         .switch_account => |opts| try handleSwitch(allocator, codex_home.?, opts),
+        .renewal => |opts| try handleRenewal(allocator, codex_home.?, opts),
         .remove_account => |opts| try handleRemove(allocator, codex_home.?, opts),
         .clean => try handleClean(allocator, codex_home.?),
     }
@@ -398,6 +431,7 @@ fn runMainArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 fn isHandledCliError(err: anyerror) bool {
     return err == error.AccountNotFound or
         err == error.CodexLoginFailed or
+        err == error.InvalidRenewalDate or
         err == error.RemoveConfirmationUnavailable or
         err == error.RemoveSelectionRequiresTty or
         err == error.InvalidRemoveSelectionInput;
@@ -1352,6 +1386,77 @@ fn handleSwitch(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.
 
     try registry.activateAccountByKey(allocator, codex_home, &reg, account_key);
     try registry.saveRegistry(allocator, codex_home, &reg);
+}
+
+fn printHandledError(message: []const u8, hint: ?[]const u8) !void {
+    var buffer: [1024]u8 = undefined;
+    var writer = io_util.stderrWriter(&buffer);
+    const out = &writer.interface;
+    const use_color = io_util.stderrIsTty();
+    try cli.writeErrorPrefixTo(out, use_color);
+    try out.print(" {s}\n", .{message});
+    if (hint) |text| {
+        try cli.writeHintPrefixTo(out, use_color);
+        try out.print(" {s}\n", .{text});
+    }
+    try out.flush();
+}
+
+fn printRenewalMessage(
+    action: []const u8,
+    account_key: []const u8,
+    value: ?[]const u8,
+) !void {
+    var stdout: io_util.Stdout = undefined;
+    stdout.init();
+    const out = stdout.out();
+    if (value) |text| {
+        try out.print("{s}: {s} -> {s}\n", .{ action, account_key, text });
+    } else {
+        try out.print("{s}: {s}\n", .{ action, account_key });
+    }
+    try out.flush();
+}
+
+fn handleRenewal(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.RenewalOptions) !void {
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+
+    switch (opts) {
+        .set => |set_opts| {
+            if (!registry.renewalDateStringIsValid(set_opts.date)) {
+                try printHandledError(
+                    "invalid renewal date; expected YYYY-MM-DD.",
+                    "Run `codex-auth renewal set --account-key <key> --date YYYY-MM-DD`.",
+                );
+                return error.InvalidRenewalDate;
+            }
+            _ = registry.findAccountIndexByAccountKey(&reg, set_opts.account_key) orelse {
+                try cli.printAccountNotFoundError(set_opts.account_key);
+                return error.AccountNotFound;
+            };
+            try registry.setAccountRenewal(allocator, &reg, set_opts.account_key, set_opts.date, .manual, .ok);
+            try registry.saveRegistry(allocator, codex_home, &reg);
+            if (set_opts.json) {
+                try printAccountsJson(allocator, codex_home, &reg, null, .{});
+            } else {
+                try printRenewalMessage("saved next renewal date", set_opts.account_key, set_opts.date);
+            }
+        },
+        .clear => |clear_opts| {
+            _ = registry.findAccountIndexByAccountKey(&reg, clear_opts.account_key) orelse {
+                try cli.printAccountNotFoundError(clear_opts.account_key);
+                return error.AccountNotFound;
+            };
+            try registry.clearAccountRenewal(allocator, &reg, clear_opts.account_key);
+            try registry.saveRegistry(allocator, codex_home, &reg);
+            if (clear_opts.json) {
+                try printAccountsJson(allocator, codex_home, &reg, null, .{});
+            } else {
+                try printRenewalMessage("cleared next renewal date", clear_opts.account_key, null);
+            }
+        },
+    }
 }
 
 fn handleConfig(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ConfigOptions) !void {

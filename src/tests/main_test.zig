@@ -91,6 +91,7 @@ test "Scenario: Given empty registry when writing account json then top-level ma
     };
     try std.testing.expectEqual(@as(i64, registry.current_schema_version), root.get("schema_version").?.integer);
     try std.testing.expectEqualStrings("/tmp/codex-home", root.get("codex_home").?.string);
+    try std.testing.expect(!root.get("api").?.object.get("renewal").?.bool);
     try std.testing.expectEqual(@as(usize, 0), accounts.items.len);
     try std.testing.expect(!root.get("refresh").?.object.get("usage_requested").?.bool);
 }
@@ -126,6 +127,7 @@ test "Scenario: Given active grouped accounts with usage when writing account js
     try std.testing.expect(std.mem.indexOf(u8, json, "\"active\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"401\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"remaining_percent\":80") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"renewal\":{\"next_renewal_at\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"usage_requested\":true") != null);
 }
 

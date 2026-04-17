@@ -2,7 +2,7 @@ import Foundation
 
 typealias CLICommandRunner = @Sendable (_ executablePath: String, _ args: [String], _ environment: [String: String]) throws -> CommandResult
 typealias CLIExecutableChecker = @Sendable (_ path: String) -> Bool
-typealias CLIShellResolver = @Sendable (_ environment: [String: String]) -> String?
+typealias CLIShellResolver = @Sendable (_ command: String, _ environment: [String: String]) -> String?
 
 enum CLIClientError: LocalizedError {
     case missingCLI
@@ -54,13 +54,17 @@ struct CLIClient: Sendable {
             try CLIClient.runExecutable(executablePath, args: args, environment: environment)
         },
         isExecutable: @escaping CLIExecutableChecker = { FileManager.default.isExecutableFile(atPath: $0) },
-        shellResolver: @escaping CLIShellResolver = { environment in
-            CLIClient.resolveViaShell(environment: environment)
+        shellResolver: @escaping CLIShellResolver = { command, environment in
+            CLIClient.resolveViaShell(command: command, environment: environment)
         }
     ) {
         let resolvedShellEnvironment = CLIClient.makeShellEnvironment(from: environment)
         shellEnvironment = resolvedShellEnvironment
-        codexEnvironment = CLIClient.makeCodexEnvironment(from: resolvedShellEnvironment)
+        codexEnvironment = CLIClient.makeCodexEnvironment(
+            from: resolvedShellEnvironment,
+            isExecutable: isExecutable,
+            shellResolver: shellResolver
+        )
         self.commandRunner = commandRunner
         self.executablePath = executablePath ?? CLIClient.resolveExecutablePath(
             preferredPath: preferredPath,
@@ -81,11 +85,44 @@ struct CLIClient: Sendable {
             return try loadState(args: ["list", "--json"])
         case .activeOnly:
             return try loadStateRefreshingActiveAccount()
+        case .allAccounts:
+            return try loadState(args: ["list", "--json", "--refresh-usage"])
         }
     }
 
     func switchAccount(accountKey: String) throws -> CodexState {
         let result = try run(["switch", "--account-key", accountKey, "--json"])
+        return try decodeState(result.stdout)
+    }
+
+    func setAPIConfig(usageAccountEnabled: Bool? = nil) throws -> ApiConfig {
+        if let usageAccountEnabled {
+            _ = try run(["config", "api", usageAccountEnabled ? "enable" : "disable"])
+        }
+        return try loadState(refreshScope: .none).api
+    }
+
+    func setRenewal(accountKey: String, date: String) throws -> CodexState {
+        let result = try run([
+            "renewal",
+            "set",
+            "--account-key",
+            accountKey,
+            "--date",
+            date,
+            "--json",
+        ])
+        return try decodeState(result.stdout)
+    }
+
+    func clearRenewal(accountKey: String) throws -> CodexState {
+        let result = try run([
+            "renewal",
+            "clear",
+            "--account-key",
+            accountKey,
+            "--json",
+        ])
         return try decodeState(result.stdout)
     }
 
@@ -176,8 +213,8 @@ struct CLIClient: Sendable {
         bundledPath: String? = nil,
         environment: [String: String],
         isExecutable: @escaping CLIExecutableChecker = { FileManager.default.isExecutableFile(atPath: $0) },
-        shellResolver: @escaping CLIShellResolver = { environment in
-            CLIClient.resolveViaShell(environment: environment)
+        shellResolver: @escaping CLIShellResolver = { command, environment in
+            CLIClient.resolveViaShell(command: command, environment: environment)
         }
     ) -> String? {
         var seen = Set<String>()
@@ -203,7 +240,7 @@ struct CLIClient: Sendable {
             return path
         }
 
-        if let path = shellResolver(environment), isExecutable(path) {
+        if let path = shellResolver("codex-auth", environment), isExecutable(path) {
             return path
         }
 
@@ -250,8 +287,48 @@ struct CLIClient: Sendable {
         return CommandResult(stdout: stdoutData, stderr: stderrData, status: process.terminationStatus)
     }
 
-    private static func resolveViaShell(environment: [String: String]) -> String? {
-        guard let result = try? runExecutable("/bin/zsh", args: ["-lc", "command -v codex-auth"], environment: environment),
+    private static func resolveNodeExecutablePath(
+        environment: [String: String],
+        isExecutable: @escaping CLIExecutableChecker = { FileManager.default.isExecutableFile(atPath: $0) },
+        shellResolver: @escaping CLIShellResolver = { command, environment in
+            CLIClient.resolveViaShell(command: command, environment: environment)
+        }
+    ) -> String? {
+        var seen = Set<String>()
+        var candidates: [String] = []
+
+        func appendCandidate(_ path: String?) {
+            guard let path, !path.isEmpty else { return }
+            guard seen.insert(path).inserted else { return }
+            candidates.append(path)
+        }
+
+        appendCandidate(environment["CODEX_AUTH_NODE_EXECUTABLE"])
+        if let nvmBin = environment["NVM_BIN"], !nvmBin.isEmpty {
+            appendCandidate((nvmBin as NSString).appendingPathComponent("node"))
+        }
+        for entry in pathEntries(from: environment["PATH"]) {
+            appendCandidate((entry as NSString).appendingPathComponent("node"))
+        }
+        if let home = firstNonEmpty(environment["HOME"], environment["USERPROFILE"]) {
+            for candidate in discoverUserNodeCandidates(home: home) {
+                appendCandidate(candidate)
+            }
+        }
+
+        for path in candidates where isExecutable(path) {
+            return path
+        }
+
+        if let path = shellResolver("node", environment), isExecutable(path) {
+            return path
+        }
+
+        return nil
+    }
+
+    private static func resolveViaShell(command: String, environment: [String: String]) -> String? {
+        guard let result = try? runExecutable("/bin/zsh", args: ["-lc", "command -v \(shellQuoted(command))"], environment: environment),
               result.status == 0 else {
             return nil
         }
@@ -269,9 +346,25 @@ struct CLIClient: Sendable {
         return env
     }
 
-    private static func makeCodexEnvironment(from shellEnvironment: [String: String]) -> [String: String] {
+    private static func makeCodexEnvironment(
+        from shellEnvironment: [String: String],
+        isExecutable: @escaping CLIExecutableChecker = { FileManager.default.isExecutableFile(atPath: $0) },
+        shellResolver: @escaping CLIShellResolver = { command, environment in
+            CLIClient.resolveViaShell(command: command, environment: environment)
+        }
+    ) -> [String: String] {
         var env = shellEnvironment
         env["CODEX_AUTH_SKIP_SERVICE_RECONCILE"] = "1"
+        if let nodePath = resolveNodeExecutablePath(
+            environment: shellEnvironment,
+            isExecutable: isExecutable,
+            shellResolver: shellResolver
+        ) {
+            env["CODEX_AUTH_NODE_EXECUTABLE"] = nodePath
+            let nodeDir = (nodePath as NSString).deletingLastPathComponent
+            let mergedPath = uniquePathEntries([nodeDir] + pathEntries(from: env["PATH"]))
+            env["PATH"] = mergedPath.joined(separator: ":")
+        }
         return env
     }
 
@@ -347,6 +440,28 @@ struct CLIClient: Sendable {
             guard let value else { return false }
             return !value.isEmpty
         } ?? nil
+    }
+
+    private static func discoverUserNodeCandidates(home: String) -> [String] {
+        let fileManager = FileManager.default
+        var candidates = [
+            (home as NSString).appendingPathComponent(".nvm/current/bin/node"),
+            (home as NSString).appendingPathComponent(".nodenv/shims/node"),
+        ]
+
+        let nvmVersionsRoot = (home as NSString).appendingPathComponent(".nvm/versions/node")
+        if let versions = try? fileManager.contentsOfDirectory(atPath: nvmVersionsRoot) {
+            let sortedVersions = versions.sorted {
+                $0.localizedStandardCompare($1) == .orderedAscending
+            }
+            for version in sortedVersions.reversed() {
+                candidates.append(
+                    (nvmVersionsRoot as NSString).appendingPathComponent("\(version)/bin/node")
+                )
+            }
+        }
+
+        return candidates
     }
 
     private static func shellQuoted(_ value: String) -> String {

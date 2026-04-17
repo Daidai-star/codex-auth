@@ -67,9 +67,23 @@ pub const AutoOptions = union(enum) {
     configure: AutoThresholdOptions,
 };
 pub const ApiAction = enum { enable, disable };
+pub const ApiCommand = ApiAction;
+pub const RenewalSetOptions = struct {
+    account_key: []u8,
+    date: []u8,
+    json: bool = false,
+};
+pub const RenewalClearOptions = struct {
+    account_key: []u8,
+    json: bool = false,
+};
+pub const RenewalOptions = union(enum) {
+    set: RenewalSetOptions,
+    clear: RenewalClearOptions,
+};
 pub const ConfigOptions = union(enum) {
     auto_switch: AutoOptions,
-    api: ApiAction,
+    api: ApiCommand,
 };
 pub const DaemonMode = enum { watch, once };
 pub const DaemonOptions = struct { mode: DaemonMode };
@@ -80,6 +94,7 @@ pub const HelpTopic = enum {
     login,
     import_auth,
     switch_account,
+    renewal,
     remove_account,
     clean,
     config,
@@ -91,6 +106,7 @@ pub const Command = union(enum) {
     login: LoginOptions,
     import_auth: ImportOptions,
     switch_account: SwitchOptions,
+    renewal: RenewalOptions,
     remove_account: RemoveOptions,
     clean: CleanOptions,
     config: ConfigOptions,
@@ -345,6 +361,103 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
         return .{ .command = .{ .switch_account = .{ .query = query, .account_key = account_key, .json = json } } };
     }
 
+    if (std.mem.eql(u8, cmd, "renewal")) {
+        if (args.len == 3 and isHelpFlag(std.mem.sliceTo(args[2], 0))) {
+            return .{ .command = .{ .help = .renewal } };
+        }
+        if (args.len < 3) return usageErrorResult(allocator, .renewal, "`renewal` requires an action.", .{});
+
+        const action = std.mem.sliceTo(args[2], 0);
+        var account_key: ?[]u8 = null;
+        var date: ?[]u8 = null;
+        var json = false;
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            const arg = std.mem.sliceTo(args[i], 0);
+            if (std.mem.eql(u8, arg, "--account-key")) {
+                if (i + 1 >= args.len) {
+                    if (account_key) |value| allocator.free(value);
+                    if (date) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .renewal, "missing value for `--account-key`.", .{});
+                }
+                if (account_key != null) {
+                    if (account_key) |value| allocator.free(value);
+                    if (date) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .renewal, "duplicate `--account-key` for `renewal`.", .{});
+                }
+                account_key = try allocator.dupe(u8, std.mem.sliceTo(args[i + 1], 0));
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--date")) {
+                if (i + 1 >= args.len) {
+                    if (account_key) |value| allocator.free(value);
+                    if (date) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .renewal, "missing value for `--date`.", .{});
+                }
+                if (date != null) {
+                    if (account_key) |value| allocator.free(value);
+                    if (date) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .renewal, "duplicate `--date` for `renewal`.", .{});
+                }
+                date = try allocator.dupe(u8, std.mem.sliceTo(args[i + 1], 0));
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--json")) {
+                if (json) {
+                    if (account_key) |value| allocator.free(value);
+                    if (date) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .renewal, "duplicate `--json` for `renewal`.", .{});
+                }
+                json = true;
+                continue;
+            }
+            if (std.mem.startsWith(u8, arg, "-")) {
+                if (account_key) |value| allocator.free(value);
+                if (date) |value| allocator.free(value);
+                return usageErrorResult(allocator, .renewal, "unknown flag `{s}` for `renewal`.", .{arg});
+            }
+            if (account_key) |value| allocator.free(value);
+            if (date) |value| allocator.free(value);
+            return usageErrorResult(allocator, .renewal, "unexpected argument `{s}` for `renewal`.", .{arg});
+        }
+
+        if (!std.mem.eql(u8, action, "set") and !std.mem.eql(u8, action, "clear")) {
+            if (account_key) |value| allocator.free(value);
+            if (date) |value| allocator.free(value);
+            return usageErrorResult(allocator, .renewal, "unknown action `{s}` for `renewal`.", .{action});
+        }
+
+        if (account_key == null) {
+            if (date) |value| allocator.free(value);
+            return usageErrorResult(allocator, .renewal, "`renewal {s}` requires `--account-key`.", .{action});
+        }
+
+        if (std.mem.eql(u8, action, "set")) {
+            if (date == null) {
+                if (account_key) |value| allocator.free(value);
+                return usageErrorResult(allocator, .renewal, "`renewal set` requires `--date YYYY-MM-DD`.", .{});
+            }
+            return .{ .command = .{ .renewal = .{ .set = .{
+                .account_key = account_key.?,
+                .date = date.?,
+                .json = json,
+            } } } };
+        }
+        if (date != null) {
+            if (account_key) |value| allocator.free(value);
+            if (date) |value| allocator.free(value);
+            return usageErrorResult(allocator, .renewal, "`--date` is only valid for `renewal set`.", .{});
+        }
+        if (std.mem.eql(u8, action, "clear")) {
+            return .{ .command = .{ .renewal = .{ .clear = .{
+                .account_key = account_key.?,
+                .json = json,
+            } } } };
+        }
+    }
+
     if (std.mem.eql(u8, cmd, "remove")) {
         if (args.len == 3 and isHelpFlag(std.mem.sliceTo(args[2], 0))) {
             return .{ .command = .{ .help = .remove_account } };
@@ -443,11 +556,13 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
             if (args.len == 4 and isHelpFlag(std.mem.sliceTo(args[3], 0))) {
                 return .{ .command = .{ .help = .config } };
             }
-            if (args.len != 4) return usageErrorResult(allocator, .config, "`config api` requires `enable` or `disable`.", .{});
-            const action = std.mem.sliceTo(args[3], 0);
-            if (std.mem.eql(u8, action, "enable")) return .{ .command = .{ .config = .{ .api = .enable } } };
-            if (std.mem.eql(u8, action, "disable")) return .{ .command = .{ .config = .{ .api = .disable } } };
-            return usageErrorResult(allocator, .config, "unknown action `{s}` for `config api`.", .{action});
+            if (args.len == 4) {
+                const action = std.mem.sliceTo(args[3], 0);
+                if (std.mem.eql(u8, action, "enable")) return .{ .command = .{ .config = .{ .api = .enable } } };
+                if (std.mem.eql(u8, action, "disable")) return .{ .command = .{ .config = .{ .api = .disable } } };
+                return usageErrorResult(allocator, .config, "unknown action `{s}` for `config api`.", .{action});
+            }
+            return usageErrorResult(allocator, .config, "`config api` requires `enable` or `disable`.", .{});
         }
 
         return usageErrorResult(allocator, .config, "unknown config section `{s}`.", .{scope});
@@ -485,6 +600,13 @@ fn freeCommand(allocator: std.mem.Allocator, cmd: *Command) void {
         .switch_account => |*opts| {
             if (opts.query) |e| allocator.free(e);
             if (opts.account_key) |key| allocator.free(key);
+        },
+        .renewal => |*opts| switch (opts.*) {
+            .set => |*renewal_opts| {
+                allocator.free(renewal_opts.account_key);
+                allocator.free(renewal_opts.date);
+            },
+            .clear => |*renewal_opts| allocator.free(renewal_opts.account_key),
         },
         .remove_account => |*opts| {
             if (opts.query) |q| allocator.free(q);
@@ -548,6 +670,7 @@ fn helpTopicForName(name: []const u8) ?HelpTopic {
     if (std.mem.eql(u8, name, "login")) return .login;
     if (std.mem.eql(u8, name, "import")) return .import_auth;
     if (std.mem.eql(u8, name, "switch")) return .switch_account;
+    if (std.mem.eql(u8, name, "renewal")) return .renewal;
     if (std.mem.eql(u8, name, "remove")) return .remove_account;
     if (std.mem.eql(u8, name, "clean")) return .clean;
     if (std.mem.eql(u8, name, "config")) return .config;
@@ -616,7 +739,6 @@ pub fn writeHelp(
         if (api_cfg.account) "ON" else "OFF",
         null,
     );
-
     try writeHelpSectionTitle(out, use_color, "Commands");
 
     const commands = [_]HelpEntry{
@@ -626,6 +748,7 @@ pub fn writeHelp(
         .{ .name = "login", .description = "Login and add the current account" },
         .{ .name = "import", .description = "Import auth files or rebuild registry" },
         .{ .name = "switch [<query>]", .description = "Switch the active account" },
+        .{ .name = "renewal", .description = "Manage next renewal dates" },
         .{ .name = "remove [<query>|--all]", .description = "Remove one or more accounts" },
         .{ .name = "clean", .description = "Delete backup and stale files under accounts/" },
         .{ .name = "config", .description = "Manage configuration" },
@@ -663,6 +786,7 @@ pub fn writeHelp(
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[6].name, commands[6].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[7].name, commands[7].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[8].name, commands[8].description);
+    try writeHelpEntry(out, use_color, parent_indent, command_col, commands[9].name, commands[9].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[0].name, config_details[0].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[1].name, config_details[1].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[2].name, config_details[2].description);
@@ -674,6 +798,7 @@ pub fn writeHelp(
     try out.writeAll("  codex-auth switch\n");
     try out.writeAll("  codex-auth login --device-auth\n");
     try out.writeAll("  codex-auth import /path/to/auth.json --alias personal\n");
+    try out.writeAll("  codex-auth renewal set --account-key user::acct --date 2026-05-01\n");
 
     try writeHelpSectionTitle(out, use_color, "Notes");
     try out.writeAll("  Run `codex-auth <command> --help` for command-specific usage details.\n");
@@ -789,6 +914,7 @@ fn commandNameForTopic(topic: HelpTopic) []const u8 {
         .login => "login",
         .import_auth => "import",
         .switch_account => "switch",
+        .renewal => "renewal",
         .remove_account => "remove",
         .clean => "clean",
         .config => "config",
@@ -804,16 +930,17 @@ fn commandDescriptionForTopic(topic: HelpTopic) []const u8 {
         .login => "Run `codex login` or `codex login --device-auth`, then add the current account.",
         .import_auth => "Import auth files or rebuild the registry.",
         .switch_account => "Switch the active account interactively or by query.",
+        .renewal => "Manage manually recorded next-renewal dates.",
         .remove_account => "Remove one or more accounts.",
         .clean => "Delete backup and stale files under accounts/.",
-        .config => "Manage auto-switch and usage API configuration.",
+        .config => "Manage auto-switch and API configuration.",
         .daemon => "Run the background auto-switch daemon.",
     };
 }
 
 fn commandHelpHasExamples(topic: HelpTopic) bool {
     return switch (topic) {
-        .import_auth, .switch_account, .remove_account, .config, .daemon => true,
+        .import_auth, .switch_account, .renewal, .remove_account, .config, .daemon => true,
         else => false,
     };
 }
@@ -844,6 +971,10 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth switch\n");
             try out.writeAll("  codex-auth switch <query>\n");
             try out.writeAll("  codex-auth switch --account-key <key> [--json]\n");
+        },
+        .renewal => {
+            try out.writeAll("  codex-auth renewal set --account-key <key> --date YYYY-MM-DD [--json]\n");
+            try out.writeAll("  codex-auth renewal clear --account-key <key> [--json]\n");
         },
         .remove_account => {
             try out.writeAll("  codex-auth remove\n");
@@ -896,6 +1027,10 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth switch john@example.com\n");
             try out.writeAll("  codex-auth switch --account-key user-id::account-id --json\n");
         },
+        .renewal => {
+            try out.writeAll("  codex-auth renewal set --account-key user-id::account-id --date 2026-05-01\n");
+            try out.writeAll("  codex-auth renewal clear --account-key user-id::account-id --json\n");
+        },
         .remove_account => {
             try out.writeAll("  codex-auth remove\n");
             try out.writeAll("  codex-auth remove john@example.com\n");
@@ -935,6 +1070,7 @@ fn helpCommandForTopic(topic: HelpTopic) []const u8 {
         .login => "codex-auth login --help",
         .import_auth => "codex-auth import --help",
         .switch_account => "codex-auth switch --help",
+        .renewal => "codex-auth renewal --help",
         .remove_account => "codex-auth remove --help",
         .clean => "codex-auth clean --help",
         .config => "codex-auth config --help",

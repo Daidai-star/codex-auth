@@ -138,6 +138,15 @@ final class AppModel: ObservableObject {
         Array(sortedAccounts.dropFirst(8))
     }
 
+    var apiStatusSummary: String {
+        guard let api = state?.api else { return "额度 API：读取中" }
+        return "额度 API：\(api.usage ? "已开启" : "已关闭")"
+    }
+
+    var canRefreshAllUsage: Bool {
+        state?.api.usage == true
+    }
+
     func setRestartCodexAfterSwitch(_ enabled: Bool) {
         restartCodexAfterSwitch = enabled
         CodexMenuPreferences.setRestartCodexAfterSwitch(enabled)
@@ -172,6 +181,8 @@ final class AppModel: ObservableObject {
             return "正在加载"
         case .activeOnly:
             return "正在同步本地额度"
+        case .allAccounts:
+            return "正在刷新全部账号额度"
         }
     }
 
@@ -186,6 +197,9 @@ final class AppModel: ObservableObject {
                 }
                 return "当前没有可同步的本地额度"
             }
+            if let active = state.activeAccount, let failure = active.usageFailureSummary {
+                return "当前账号额度刷新失败：\(failure)"
+            }
             guard state.refresh.attempted > 0, let active = state.activeAccount else {
                 return "当前没有可同步的本地额度"
             }
@@ -193,6 +207,17 @@ final class AppModel: ObservableObject {
                 return "本地额度已更新：\(active.label)"
             }
             return "本地额度已同步：\(active.label)"
+        case .allAccounts:
+            if !state.api.usage || state.refresh.localOnlyMode {
+                return "全部额度刷新需要先开启额度 API"
+            }
+            if state.refresh.attempted == 0 {
+                return "当前没有可刷新的账号额度"
+            }
+            if state.refresh.failed == state.refresh.attempted {
+                return "全部额度刷新失败，请检查 Node.js 或账号登录态"
+            }
+            return "全部额度刷新完成：\(state.refresh.updated) 个已更新，\(state.refresh.failed) 个失败"
         }
     }
 
