@@ -1516,3 +1516,160 @@ test "import cc-switch api profiles updates existing stable profile in place" {
     try std.testing.expectEqualStrings("CPA Updated", reg.api_profiles.items[0].label);
     try std.testing.expectEqualStrings("gpt-5.5", reg.api_profiles.items[0].model.?);
 }
+
+test "activate account restores shared plugin config from known snapshots" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("accounts");
+    const codex_home = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(codex_home);
+
+    var reg = makeEmptyRegistry();
+    defer reg.deinit(gpa);
+
+    const email = "plugin-shared@example.com";
+    try reg.accounts.append(gpa, try makeAccountRecord(gpa, email, "work", .plus, .chatgpt, 1));
+    reg.active_auth_mode = .apikey;
+
+    const account_key = try accountKeyForEmailAlloc(gpa, email);
+    defer gpa.free(account_key);
+
+    const account_auth_path = try registry.accountAuthPath(gpa, codex_home, account_key);
+    defer gpa.free(account_auth_path);
+    const account_auth = try authJsonWithEmailPlan(gpa, email, "plus");
+    defer gpa.free(account_auth);
+    try std.fs.cwd().writeFile(.{ .sub_path = account_auth_path, .data = account_auth });
+
+    const account_config_path = try registry.accountConfigPath(gpa, codex_home, account_key);
+    defer gpa.free(account_config_path);
+    try std.fs.cwd().writeFile(.{
+        .sub_path = account_config_path,
+        .data =
+        \\model = "gpt-5.4"
+        \\model_reasoning_effort = "high"
+        \\
+        \\[projects."/tmp/demo"]
+        \\trust_level = "trusted"
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "accounts/api-profile.seed.config.toml",
+        .data =
+        \\notify = ["plugin-runner", "turn-ended"]
+        \\
+        \\[marketplaces.openai-bundled]
+        \\source_type = "local"
+        \\source = "/tmp/openai-bundled"
+        \\
+        \\[plugins."build-macos-apps@openai-curated"]
+        \\enabled = true
+        \\
+        \\[plugins."computer-use@openai-bundled"]
+        \\enabled = true
+        ,
+    });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "config.toml",
+        .data =
+        \\model_provider = "custom"
+        \\model = "gpt-5.4"
+        ,
+    });
+
+    try registry.activateAccountByKey(gpa, codex_home, &reg, account_key);
+
+    const active_config_path = try registry.activeConfigPath(gpa, codex_home);
+    defer gpa.free(active_config_path);
+    const active_config = try bdd.readFileAlloc(gpa, active_config_path);
+    defer gpa.free(active_config);
+
+    try std.testing.expect(std.mem.indexOf(u8, active_config, "model_reasoning_effort = \"high\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, active_config, "[plugins.\"build-macos-apps@openai-curated\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, active_config, "[plugins.\"computer-use@openai-bundled\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, active_config, "notify = [\"plugin-runner\", \"turn-ended\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, active_config, "[marketplaces.openai-bundled]") != null);
+}
+
+test "capture current api profile ignores shared plugin config when matching existing profile" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("accounts");
+    const codex_home = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(codex_home);
+
+    var reg = makeEmptyRegistry();
+    defer reg.deinit(gpa);
+
+    const profile_key = "api-existing";
+    try reg.api_profiles.append(gpa, .{
+        .profile_key = try gpa.dupe(u8, profile_key),
+        .label = try gpa.dupe(u8, "Existing"),
+        .model_provider = try gpa.dupe(u8, "custom"),
+        .provider_name = try gpa.dupe(u8, "openai"),
+        .model = try gpa.dupe(u8, "gpt-5.4"),
+        .base_url = try gpa.dupe(u8, "http://localhost:8317/v1"),
+        .wire_api = try gpa.dupe(u8, "responses"),
+        .created_at = 1,
+        .last_used_at = null,
+    });
+
+    const auth_json = "{\"OPENAI_API_KEY\":\"sk-test\"}";
+    try tmp.dir.writeFile(.{ .sub_path = "auth.json", .data = auth_json });
+    try tmp.dir.writeFile(.{
+        .sub_path = "config.toml",
+        .data =
+        \\model_provider = "custom"
+        \\model = "gpt-5.4"
+        \\
+        \\[model_providers]
+        \\[model_providers.custom]
+        \\name = "openai"
+        \\wire_api = "responses"
+        \\base_url = "http://localhost:8317/v1"
+        \\
+        \\[marketplaces.openai-bundled]
+        \\source_type = "local"
+        \\source = "/tmp/openai-bundled"
+        \\
+        \\[plugins."computer-use@openai-bundled"]
+        \\enabled = true
+        ,
+    });
+
+    const profile_auth_path = try registry.apiProfileAuthPath(gpa, codex_home, profile_key);
+    defer gpa.free(profile_auth_path);
+    try std.fs.cwd().writeFile(.{ .sub_path = profile_auth_path, .data = auth_json });
+
+    const profile_config_path = try registry.apiProfileConfigPath(gpa, codex_home, profile_key);
+    defer gpa.free(profile_config_path);
+    try std.fs.cwd().writeFile(.{
+        .sub_path = profile_config_path,
+        .data =
+        \\model_provider = "custom"
+        \\model = "gpt-5.4"
+        \\
+        \\[model_providers]
+        \\[model_providers.custom]
+        \\name = "openai"
+        \\wire_api = "responses"
+        \\base_url = "http://localhost:8317/v1"
+        ,
+    });
+
+    const captured_key = try registry.captureCurrentApiProfile(gpa, codex_home, &reg, "Updated");
+    defer gpa.free(captured_key);
+
+    try std.testing.expectEqualStrings(profile_key, captured_key);
+    try std.testing.expectEqual(@as(usize, 1), reg.api_profiles.items.len);
+    try std.testing.expectEqualStrings("Updated", reg.api_profiles.items[0].label);
+
+    const updated_profile_config = try bdd.readFileAlloc(gpa, profile_config_path);
+    defer gpa.free(updated_profile_config);
+    try std.testing.expect(std.mem.indexOf(u8, updated_profile_config, "[plugins.\"computer-use@openai-bundled\"]") != null);
+}

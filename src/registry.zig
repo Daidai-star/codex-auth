@@ -650,6 +650,48 @@ fn restoreActiveFileFromSnapshot(
     return true;
 }
 
+const SharedConfigSection = struct {
+    name: []u8,
+    block: []u8,
+};
+
+const SharedPluginConfigAccumulator = struct {
+    notify_line: ?[]u8 = null,
+    sections: std.ArrayList(SharedConfigSection) = .empty,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.notify_line) |line| allocator.free(line);
+        for (self.sections.items) |section| {
+            allocator.free(section.name);
+            allocator.free(section.block);
+        }
+        self.sections.deinit(allocator);
+    }
+
+    fn putNotifyLine(self: *@This(), allocator: std.mem.Allocator, line: []const u8) !void {
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        const owned = try allocator.dupe(u8, trimmed);
+        if (self.notify_line) |existing| allocator.free(existing);
+        self.notify_line = owned;
+    }
+
+    fn putSection(self: *@This(), allocator: std.mem.Allocator, name: []const u8, block: []const u8) !void {
+        const trimmed_block = std.mem.trim(u8, block, "\r\n");
+        for (self.sections.items) |*section| {
+            if (!std.mem.eql(u8, section.name, name)) continue;
+            const owned_block = try allocator.dupe(u8, trimmed_block);
+            allocator.free(section.block);
+            section.block = owned_block;
+            return;
+        }
+
+        try self.sections.append(allocator, .{
+            .name = try allocator.dupe(u8, name),
+            .block = try allocator.dupe(u8, trimmed_block),
+        });
+    }
+};
+
 const ActiveApiConfigSummary = struct {
     model_provider: ?[]u8 = null,
     provider_name: ?[]u8 = null,
@@ -690,6 +732,270 @@ fn parseTomlSectionName(line: []const u8) ?[]const u8 {
     if (trimmed.len < 3) return null;
     if (trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return null;
     return trimmed[1 .. trimmed.len - 1];
+}
+
+fn sharedPluginConfigPath(allocator: std.mem.Allocator, codex_home: []const u8) ![]u8 {
+    return try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "shared-plugins.toml" });
+}
+
+fn isSharedPluginSection(section_name: []const u8) bool {
+    return std.mem.startsWith(u8, section_name, "marketplaces.") or
+        std.mem.startsWith(u8, section_name, "plugins.");
+}
+
+fn isTomlKeyAssignment(line: []const u8, key: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len == 0 or trimmed[0] == '#') return false;
+    if (!std.mem.startsWith(u8, trimmed, key)) return false;
+    var rest = trimmed[key.len..];
+    rest = std.mem.trimLeft(u8, rest, " \t");
+    return rest.len > 0 and rest[0] == '=';
+}
+
+fn isSharedPluginTopLevelLine(line: []const u8) bool {
+    return isTomlKeyAssignment(line, "notify");
+}
+
+fn collectSharedPluginConfigFromBytes(
+    allocator: std.mem.Allocator,
+    acc: *SharedPluginConfigAccumulator,
+    data: []const u8,
+) !void {
+    var current_section_name: ?[]u8 = null;
+    var current_section_block: std.ArrayList(u8) = .empty;
+    defer {
+        if (current_section_name) |name| allocator.free(name);
+        current_section_block.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        if (parseTomlSectionName(line)) |section_name| {
+            if (current_section_name) |name| {
+                try acc.putSection(allocator, name, current_section_block.items);
+                allocator.free(name);
+                current_section_name = null;
+                current_section_block.clearRetainingCapacity();
+            }
+
+            if (isSharedPluginSection(section_name)) {
+                current_section_name = try allocator.dupe(u8, section_name);
+                try current_section_block.appendSlice(allocator, line);
+                try current_section_block.append(allocator, '\n');
+            }
+            continue;
+        }
+
+        if (current_section_name != null) {
+            try current_section_block.appendSlice(allocator, line);
+            try current_section_block.append(allocator, '\n');
+            continue;
+        }
+
+        if (isSharedPluginTopLevelLine(line)) {
+            try acc.putNotifyLine(allocator, line);
+        }
+    }
+
+    if (current_section_name) |name| {
+        try acc.putSection(allocator, name, current_section_block.items);
+        allocator.free(name);
+        current_section_name = null;
+    }
+}
+
+fn collectSharedPluginConfigFromAccountsDir(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    acc: *SharedPluginConfigAccumulator,
+) !void {
+    const accounts_dir_path = try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "accounts" });
+    defer allocator.free(accounts_dir_path);
+
+    var dir = std.fs.cwd().openDir(accounts_dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close();
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".config.toml")) continue;
+
+        const path = try std.fs.path.join(allocator, &[_][]const u8{ accounts_dir_path, entry.name });
+        defer allocator.free(path);
+        const data = try readFileIfExists(allocator, path) orelse continue;
+        defer allocator.free(data);
+        try collectSharedPluginConfigFromBytes(allocator, acc, data);
+    }
+}
+
+fn renderSharedPluginConfig(
+    allocator: std.mem.Allocator,
+    acc: *const SharedPluginConfigAccumulator,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    if (acc.notify_line) |line| {
+        try out.appendSlice(allocator, std.mem.trim(u8, line, "\r\n"));
+        try out.append(allocator, '\n');
+    }
+
+    for (acc.sections.items) |section| {
+        if (out.items.len > 0) try out.append(allocator, '\n');
+        try out.appendSlice(allocator, std.mem.trim(u8, section.block, "\r\n"));
+        try out.append(allocator, '\n');
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn ensureSharedPluginConfig(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    current_config_bytes: ?[]const u8,
+) !?[]u8 {
+    const shared_path = try sharedPluginConfigPath(allocator, codex_home);
+    defer allocator.free(shared_path);
+
+    const existing_shared = try readFileIfExists(allocator, shared_path);
+    defer if (existing_shared) |bytes| allocator.free(bytes);
+
+    var acc = SharedPluginConfigAccumulator{};
+    defer acc.deinit(allocator);
+
+    if (existing_shared) |bytes| {
+        try collectSharedPluginConfigFromBytes(allocator, &acc, bytes);
+    } else {
+        try collectSharedPluginConfigFromAccountsDir(allocator, codex_home, &acc);
+    }
+
+    if (current_config_bytes) |bytes| {
+        try collectSharedPluginConfigFromBytes(allocator, &acc, bytes);
+    }
+
+    const rendered = try renderSharedPluginConfig(allocator, &acc);
+    if (rendered.len == 0) {
+        defer allocator.free(rendered);
+        if (existing_shared != null) try deleteFileIfExists(shared_path);
+        return null;
+    }
+
+    if (existing_shared) |bytes| {
+        if (!std.mem.eql(u8, bytes, rendered)) {
+            try writeFile(shared_path, rendered);
+        }
+    } else {
+        try writeFile(shared_path, rendered);
+    }
+
+    return rendered;
+}
+
+fn stripSharedPluginConfigFromBytes(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var skipping_shared_section = false;
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        if (parseTomlSectionName(line)) |section_name| {
+            skipping_shared_section = isSharedPluginSection(section_name);
+            if (skipping_shared_section) continue;
+        }
+
+        if (skipping_shared_section) continue;
+        if (isSharedPluginTopLevelLine(line)) continue;
+
+        try out.appendSlice(allocator, line);
+        try out.append(allocator, '\n');
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn mergeConfigBytesWithSharedPlugins(
+    allocator: std.mem.Allocator,
+    base_bytes: ?[]const u8,
+    shared_bytes: ?[]const u8,
+) !?[]u8 {
+    if (base_bytes == null and shared_bytes == null) return null;
+
+    const stripped = if (base_bytes) |bytes|
+        try stripSharedPluginConfigFromBytes(allocator, bytes)
+    else
+        try allocator.dupe(u8, "");
+    defer allocator.free(stripped);
+
+    const trimmed_base = std.mem.trimRight(u8, stripped, "\r\n");
+    const trimmed_shared = if (shared_bytes) |bytes|
+        std.mem.trim(u8, bytes, "\r\n")
+    else
+        "";
+
+    if (trimmed_base.len == 0 and trimmed_shared.len == 0) return null;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    if (trimmed_base.len > 0) {
+        try out.appendSlice(allocator, trimmed_base);
+        try out.append(allocator, '\n');
+    }
+
+    if (trimmed_shared.len > 0) {
+        if (trimmed_base.len > 0) try out.append(allocator, '\n');
+        try out.appendSlice(allocator, trimmed_shared);
+        try out.append(allocator, '\n');
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn writeOptionalFileBytes(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    bytes: ?[]const u8,
+    delete_when_missing: bool,
+) !bool {
+    if (bytes) |data| {
+        if (try fileEqualsBytes(allocator, path, data)) return false;
+        try writeFile(path, data);
+        return true;
+    }
+
+    if (!delete_when_missing or !(try fileExists(path))) return false;
+    try deleteFileIfExists(path);
+    return true;
+}
+
+fn normalizeConfigBytesWithSharedPlugins(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    base_bytes: ?[]const u8,
+) !?[]u8 {
+    const shared_bytes = try ensureSharedPluginConfig(allocator, codex_home, base_bytes);
+    defer if (shared_bytes) |bytes| allocator.free(bytes);
+    return try mergeConfigBytesWithSharedPlugins(allocator, base_bytes, shared_bytes);
+}
+
+fn configBytesEqualIgnoringSharedPlugins(
+    allocator: std.mem.Allocator,
+    a: []const u8,
+    b: []const u8,
+) !bool {
+    const stripped_a = try stripSharedPluginConfigFromBytes(allocator, a);
+    defer allocator.free(stripped_a);
+    const stripped_b = try stripSharedPluginConfigFromBytes(allocator, b);
+    defer allocator.free(stripped_b);
+
+    return std.mem.eql(
+        u8,
+        std.mem.trimRight(u8, stripped_a, "\r\n"),
+        std.mem.trimRight(u8, stripped_b, "\r\n"),
+    );
 }
 
 fn parseActiveApiConfigSummary(allocator: std.mem.Allocator, data: []const u8) !ActiveApiConfigSummary {
@@ -2328,7 +2634,9 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
     if (info.auth_mode == .apikey) {
         const config_path = try activeConfigPath(allocator, codex_home);
         defer allocator.free(config_path);
-        const config_bytes = try readFileIfExists(allocator, config_path);
+        const raw_config_bytes = try readFileIfExists(allocator, config_path);
+        defer if (raw_config_bytes) |bytes| allocator.free(bytes);
+        const config_bytes = try normalizeConfigBytesWithSharedPlugins(allocator, codex_home, raw_config_bytes);
         defer if (config_bytes) |bytes| allocator.free(bytes);
 
         if (try findMatchingApiProfileIndexForCurrentFiles(
@@ -2339,6 +2647,14 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
             config_bytes,
         )) |idx| {
             const profile_key = reg.api_profiles.items[idx].profile_key;
+            const profile_auth_path = try apiProfileAuthPath(allocator, codex_home, profile_key);
+            defer allocator.free(profile_auth_path);
+            _ = try writeOptionalFileBytes(allocator, profile_auth_path, auth_bytes, false);
+
+            const profile_config_path = try apiProfileConfigPath(allocator, codex_home, profile_key);
+            defer allocator.free(profile_config_path);
+            _ = try writeOptionalFileBytes(allocator, profile_config_path, config_bytes, true);
+
             const changed = reg.active_auth_mode != .apikey or
                 reg.active_account_key != null or
                 reg.active_api_profile_key == null or
@@ -2656,7 +2972,12 @@ fn syncActiveConfigSnapshotForAccount(
     defer allocator.free(current_config_path);
     const snapshot_path = try accountConfigPath(allocator, codex_home, account_key);
     defer allocator.free(snapshot_path);
-    return syncSnapshotFileFromCurrent(allocator, current_config_path, snapshot_path);
+
+    const current_bytes = try readFileIfExists(allocator, current_config_path);
+    defer if (current_bytes) |bytes| allocator.free(bytes);
+    const normalized_bytes = try normalizeConfigBytesWithSharedPlugins(allocator, codex_home, current_bytes);
+    defer if (normalized_bytes) |bytes| allocator.free(bytes);
+    return writeOptionalFileBytes(allocator, snapshot_path, normalized_bytes, true);
 }
 
 fn restoreAccountConfigSnapshotToActive(
@@ -2670,7 +2991,12 @@ fn restoreAccountConfigSnapshotToActive(
     if (!delete_when_missing and !(try fileExists(snapshot_path))) return false;
     const current_config_path = try activeConfigPath(allocator, codex_home);
     defer allocator.free(current_config_path);
-    return restoreActiveFileFromSnapshot(allocator, snapshot_path, current_config_path);
+
+    const snapshot_bytes = try readFileIfExists(allocator, snapshot_path);
+    defer if (snapshot_bytes) |bytes| allocator.free(bytes);
+    const normalized_bytes = try normalizeConfigBytesWithSharedPlugins(allocator, codex_home, snapshot_bytes);
+    defer if (normalized_bytes) |bytes| allocator.free(bytes);
+    return writeOptionalFileBytes(allocator, current_config_path, normalized_bytes, delete_when_missing);
 }
 
 fn findMatchingApiProfileIndexForCurrentFiles(
@@ -2688,7 +3014,9 @@ fn findMatchingApiProfileIndexForCurrentFiles(
         const config_path = try apiProfileConfigPath(allocator, codex_home, profile.profile_key);
         defer allocator.free(config_path);
         if (config_bytes) |bytes| {
-            if (!(try fileEqualsBytes(allocator, config_path, bytes))) continue;
+            const profile_config_bytes = try readFileIfExists(allocator, config_path) orelse continue;
+            defer allocator.free(profile_config_bytes);
+            if (!(try configBytesEqualIgnoringSharedPlugins(allocator, profile_config_bytes, bytes))) continue;
         } else if (try fileExists(config_path)) {
             continue;
         }
@@ -2711,7 +3039,9 @@ pub fn captureCurrentApiProfile(
 
     const auth_bytes = try readFileIfExists(allocator, auth_path) orelse return error.AuthFileNotFound;
     defer allocator.free(auth_bytes);
-    const config_bytes = try readFileIfExists(allocator, config_path) orelse return error.ConfigFileNotFound;
+    const raw_config_bytes = try readFileIfExists(allocator, config_path) orelse return error.ConfigFileNotFound;
+    defer allocator.free(raw_config_bytes);
+    const config_bytes = (try normalizeConfigBytesWithSharedPlugins(allocator, codex_home, raw_config_bytes)) orelse return error.ConfigFileNotFound;
     defer allocator.free(config_bytes);
 
     const info = try @import("auth.zig").parseAuthInfo(allocator, auth_path);
@@ -2725,6 +3055,12 @@ pub fn captureCurrentApiProfile(
 
     if (try findMatchingApiProfileIndexForCurrentFiles(allocator, codex_home, reg, auth_bytes, config_bytes)) |idx| {
         const profile = &reg.api_profiles.items[idx];
+        const auth_dest = try apiProfileAuthPath(allocator, codex_home, profile.profile_key);
+        defer allocator.free(auth_dest);
+        const config_dest = try apiProfileConfigPath(allocator, codex_home, profile.profile_key);
+        defer allocator.free(config_dest);
+        _ = try writeOptionalFileBytes(allocator, auth_dest, auth_bytes, false);
+        _ = try writeOptionalFileBytes(allocator, config_dest, config_bytes, true);
         _ = try updateApiProfileMetadata(allocator, profile, label, &summary);
         try setActiveApiProfileKey(allocator, reg, profile.profile_key);
         return try allocator.dupe(u8, profile.profile_key);
@@ -2808,7 +3144,11 @@ pub fn activateApiProfileByKey(
 
     try backupAuthIfChanged(allocator, codex_home, dest_auth, src_auth);
     try copyFile(src_auth, dest_auth);
-    _ = try restoreActiveFileFromSnapshot(allocator, src_config, dest_config);
+    const snapshot_bytes = try readFileIfExists(allocator, src_config);
+    defer if (snapshot_bytes) |bytes| allocator.free(bytes);
+    const normalized_bytes = try normalizeConfigBytesWithSharedPlugins(allocator, codex_home, snapshot_bytes);
+    defer if (normalized_bytes) |bytes| allocator.free(bytes);
+    _ = try writeOptionalFileBytes(allocator, dest_config, normalized_bytes, true);
     try setActiveApiProfileKey(allocator, reg, profile_key);
     tryEnsureDualProviderHistory(allocator, codex_home);
 }
