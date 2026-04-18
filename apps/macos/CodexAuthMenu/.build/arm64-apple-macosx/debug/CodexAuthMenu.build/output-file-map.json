@@ -1,0 +1,54 @@
+{
+  "": {
+    "swift-dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/primary.swiftdeps"
+  },
+  "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/Sources/CodexAuthMenu/AppModel.swift": {
+    "dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/AppModel.d",
+    "object": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/AppModel.swift.o",
+    "swiftmodule": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/AppModel~partial.swiftmodule",
+    "swift-dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/AppModel.swiftdeps",
+    "diagnostics": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/AppModel.dia"
+  },
+  "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/Sources/CodexAuthMenu/CLIClient.swift": {
+    "dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CLIClient.d",
+    "object": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CLIClient.swift.o",
+    "swiftmodule": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CLIClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CLIClient.swiftdeps",
+    "diagnostics": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CLIClient.dia"
+  },
+  "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/Sources/CodexAuthMenu/CodexAuthMenuApp.swift": {
+    "dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexAuthMenuApp.d",
+    "object": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexAuthMenuApp.swift.o",
+    "swiftmodule": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexAuthMenuApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexAuthMenuApp.swiftdeps",
+    "diagnostics": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexAuthMenuApp.dia"
+  },
+  "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/Sources/CodexAuthMenu/CodexDesktopController.swift": {
+    "dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexDesktopController.d",
+    "object": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexDesktopController.swift.o",
+    "swiftmodule": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexDesktopController~partial.swiftmodule",
+    "swift-dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexDesktopController.swiftdeps",
+    "diagnostics": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexDesktopController.dia"
+  },
+  "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/Sources/CodexAuthMenu/CodexModels.swift": {
+    "dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexModels.d",
+    "object": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexModels.swift.o",
+    "swiftmodule": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexModels~partial.swiftmodule",
+    "swift-dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexModels.swiftdeps",
+    "diagnostics": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/CodexModels.dia"
+  },
+  "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/Sources/CodexAuthMenu/LocalWebServer.swift": {
+    "dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/LocalWebServer.d",
+    "object": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/LocalWebServer.swift.o",
+    "swiftmodule": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/LocalWebServer~partial.swiftmodule",
+    "swift-dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/LocalWebServer.swiftdeps",
+    "diagnostics": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/LocalWebServer.dia"
+  },
+  "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/Sources/CodexAuthMenu/WebControlPage.swift": {
+    "dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/WebControlPage.d",
+    "object": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/WebControlPage.swift.o",
+    "swiftmodule": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/WebControlPage~partial.swiftmodule",
+    "swift-dependencies": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/WebControlPage.swiftdeps",
+    "diagnostics": "/Users/yangqingyu/workspace/codex-auth/apps/macos/CodexAuthMenu/.build/arm64-apple-macosx/debug/CodexAuthMenu.build/WebControlPage.dia"
+  }
+}
