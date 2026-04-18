@@ -10,12 +10,8 @@ permissions:
 
 jobs:
   build-test:
-    name: Build & Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    name: Build & Test (macOS)
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
@@ -31,7 +27,7 @@ jobs:
         run: |
           zig version
           zig env
-          bash scripts/test-zig.sh
+          PATH="$PWD/scripts:$PATH" bash scripts/validate-zig.sh list
 
       - name: Build native binary
         shell: bash
@@ -44,14 +40,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - id: linux-x64
-            zig_target: x86_64-linux-gnu
-            binary_name: codex-auth
-            archive_name: codex-auth-Linux-X64.tar.gz
-          - id: linux-arm64
-            zig_target: aarch64-linux-gnu
-            binary_name: codex-auth
-            archive_name: codex-auth-Linux-ARM64.tar.gz
           - id: darwin-x64
             zig_target: x86_64-macos-none
             binary_name: codex-auth
@@ -60,14 +48,6 @@ jobs:
             zig_target: aarch64-macos-none
             binary_name: codex-auth
             archive_name: codex-auth-macOS-ARM64.tar.gz
-          - id: win32-x64
-            zig_target: x86_64-windows-gnu
-            binary_name: codex-auth.exe
-            archive_name: codex-auth-Windows-X64.zip
-          - id: win32-arm64
-            zig_target: aarch64-windows-gnu
-            binary_name: codex-auth.exe
-            archive_name: codex-auth-Windows-ARM64.zip
 
     steps:
       - name: Checkout
@@ -95,17 +75,7 @@ jobs:
         run: |
           mkdir -p "artifacts/${{ matrix.id }}/binary"
           cp "zig-out/bin/${{ matrix.binary_name }}" "artifacts/${{ matrix.id }}/binary/${{ matrix.binary_name }}"
-          if [[ "${{ matrix.id }}" == win32-* ]]; then
-            cp "zig-out/bin/codex-auth-auto.exe" "artifacts/${{ matrix.id }}/binary/codex-auth-auto.exe"
-          fi
-          if [[ "${{ matrix.archive_name }}" == *.zip ]]; then
-            (
-              cd "artifacts/${{ matrix.id }}/binary"
-              zip -q "../${{ matrix.archive_name }}" ./*
-            )
-          else
-            tar -czf "artifacts/${{ matrix.id }}/${{ matrix.archive_name }}" -C "artifacts/${{ matrix.id }}/binary" "${{ matrix.binary_name }}"
-          fi
+          tar -czf "artifacts/${{ matrix.id }}/${{ matrix.archive_name }}" -C "artifacts/${{ matrix.id }}/binary" "${{ matrix.binary_name }}"
 
       - name: Upload artifact bundle
         uses: actions/upload-artifact@v7
@@ -311,82 +281,3 @@ jobs:
           files: |
             release-assets/*/*.tar.gz
             release-assets/*/*.zip
-
-  publish-npm:
-    name: Publish npm packages
-    runs-on: ubuntu-latest
-    needs: [build-test, release-assets]
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-          package-manager-cache: false
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Check versions
-        run: node scripts/npm/check-versions.mjs ${{ github.ref_name }}
-
-      - name: Stage npm packages
-        run: node scripts/npm/stage-packages.mjs --artifacts-dir artifacts --output-dir dist/npm
-
-      - name: Read package version
-        shell: bash
-        run: |
-          node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); fs.appendFileSync(process.env.GITHUB_ENV, 'PACKAGE_VERSION=' + pkg.version + '\n');"
-
-      - name: Create pack directory
-        run: mkdir -p ./dist/packed
-
-      - name: Pack root package
-        run: npm pack ./dist/npm/root --pack-destination ./dist/packed
-
-      - name: Pack host platform package
-        run: npm pack ./dist/npm/codex-auth-linux-x64 --pack-destination ./dist/packed
-
-      - name: Smoke install packed tarballs
-        shell: bash
-        run: |
-          mkdir -p smoke
-          cd smoke
-          npm init -y
-          npm install "../dist/packed/loongphy-codex-auth-linux-x64-${PACKAGE_VERSION}.tgz" "../dist/packed/loongphy-codex-auth-${PACKAGE_VERSION}.tgz"
-          ./node_modules/.bin/codex-auth --version
-
-      - name: Set npm dist-tag
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
-            echo "NPM_DIST_TAG=next" >> "$GITHUB_ENV"
-          else
-            echo "NPM_DIST_TAG=latest" >> "$GITHUB_ENV"
-          fi
-
-      - name: Publish platform packages
-        shell: bash
-        run: |
-          for dir in \
-            codex-auth-linux-x64 \
-            codex-auth-linux-arm64 \
-            codex-auth-darwin-x64 \
-            codex-auth-darwin-arm64 \
-            codex-auth-win32-x64 \
-            codex-auth-win32-arm64
-          do
-            npm publish "./dist/npm/${dir}" --access public --tag "${NPM_DIST_TAG}"
-          done
-
-      - name: Publish root package
-        run: npm publish ./dist/npm/root --access public --tag ${{ env.NPM_DIST_TAG }}

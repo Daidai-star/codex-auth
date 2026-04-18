@@ -7,31 +7,9 @@ permissions:
   contents: read
 
 jobs:
-  release-assets:
-    name: Build Preview Packages (${{ matrix.id }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - id: linux-x64
-            zig_target: x86_64-linux-gnu
-            binary_name: codex-auth
-          - id: linux-arm64
-            zig_target: aarch64-linux-gnu
-            binary_name: codex-auth
-          - id: darwin-x64
-            zig_target: x86_64-macos-none
-            binary_name: codex-auth
-          - id: darwin-arm64
-            zig_target: aarch64-macos-none
-            binary_name: codex-auth
-          - id: win32-x64
-            zig_target: x86_64-windows-gnu
-            binary_name: codex-auth.exe
-          - id: win32-arm64
-            zig_target: aarch64-windows-gnu
-            binary_name: codex-auth.exe
+  macos-preview:
+    name: Build macOS Preview
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
@@ -42,65 +20,22 @@ jobs:
         with:
           version: 0.15.1
 
-      - name: Build binary
-        run: zig build -Dtarget=${{ matrix.zig_target }} -Doptimize=ReleaseSafe
+      - name: Build CLI
+        shell: bash
+        run: PATH="$PWD/scripts:$PATH" zig build -Doptimize=ReleaseSafe
 
-      - name: Stage artifact bundle
+      - name: Build menu app
         shell: bash
         run: |
-          mkdir -p "artifacts/${{ matrix.id }}/binary"
-          cp "zig-out/bin/${{ matrix.binary_name }}" "artifacts/${{ matrix.id }}/binary/${{ matrix.binary_name }}"
-          if [[ "${{ matrix.id }}" == win32-* ]]; then
-            cp "zig-out/bin/codex-auth-auto.exe" "artifacts/${{ matrix.id }}/binary/codex-auth-auto.exe"
-          fi
+          BUILD_DIR="$RUNNER_TEMP/codex-auth-preview/build" \
+          OUTPUT_DIR="$RUNNER_TEMP/codex-auth-preview/artifacts" \
+          SCRATCH_PATH="$RUNNER_TEMP/codex-auth-preview/swift-build" \
+          ARCHIVE_NAME="CodexAuthMenu-preview-${{ github.event.pull_request.number }}.zip" \
+          ZIG_EXECUTABLE="$(command -v zig)" \
+            bash apps/macos/CodexAuthMenu/Scripts/package-release-app.sh
 
-      - name: Upload artifact bundle
+      - name: Upload preview artifact
         uses: actions/upload-artifact@v7
         with:
-          name: bundle-${{ matrix.id }}
-          path: artifacts
-
-  publish-preview:
-    name: Publish Preview Packages
-    runs-on: ubuntu-latest
-    needs: release-assets
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: lts/*
-          package-manager-cache: false
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Check versions
-        run: node scripts/npm/check-versions.mjs ""
-
-      - name: Stage npm packages
-        run: node scripts/npm/stage-packages.mjs --artifacts-dir artifacts --output-dir dist/npm
-
-      - name: Rewrite root preview optional dependencies
-        run: >
-          node scripts/npm/rewrite-preview-optional-dependencies.mjs
-          --root-dir ./dist/npm/root
-          --repository ${{ github.repository }}
-          --pr-number ${{ github.event.pull_request.number }}
-          --sha ${{ github.event.pull_request.head.sha }}
-
-      - name: Publish preview packages
-        run: >
-          npx pkg-pr-new publish --bin
-          ./dist/npm/root
-          ./dist/npm/codex-auth-linux-x64
-          ./dist/npm/codex-auth-linux-arm64
-          ./dist/npm/codex-auth-darwin-x64
-          ./dist/npm/codex-auth-darwin-arm64
-          ./dist/npm/codex-auth-win32-x64
-          ./dist/npm/codex-auth-win32-arm64
+          name: macos-preview
+          path: ${{ runner.temp }}/codex-auth-preview/artifacts
