@@ -356,3 +356,128 @@ struct RenewalSnapshot: Codable, Sendable {
         case status
     }
 }
+
+extension CodexState {
+    init(
+        schemaVersion: Int,
+        codexHome: String,
+        activeAccountKey: String?,
+        activeAPIProfileKey: String?,
+        activeAuthMode: String?,
+        api: ApiConfig,
+        accounts: [Account],
+        apiProfiles: [APIProfile],
+        refresh: RefreshSummary
+    ) {
+        self.schemaVersion = schemaVersion
+        self.codexHome = codexHome
+        self.activeAccountKey = activeAccountKey
+        self.activeAPIProfileKey = activeAPIProfileKey
+        self.activeAuthMode = activeAuthMode
+        self.api = api
+        self.accounts = accounts
+        self.apiProfiles = apiProfiles
+        self.refresh = refresh
+    }
+
+    static func screenshotPreviewSample() -> CodexState {
+        let now = Int64(Date().timeIntervalSince1970)
+        return CodexState(
+            schemaVersion: 5,
+            codexHome: "/tmp/codex-auth-screenshot",
+            activeAccountKey: "acct-primary",
+            activeAPIProfileKey: nil,
+            activeAuthMode: "account",
+            api: ApiConfig(usage: false, account: false, renewal: false),
+            accounts: [
+                Account(
+                    accountKey: "acct-primary",
+                    label: "主力账号",
+                    email: "primary@example.com",
+                    alias: "daily",
+                    accountName: "主力工作区",
+                    plan: "plus",
+                    authMode: "chatgpt",
+                    active: true,
+                    lastUsedAt: now - 120,
+                    lastUsageAt: now - 600,
+                    usage: UsageSnapshot(
+                        status: "ok",
+                        fiveHour: UsageWindow(
+                            usedPercent: 28,
+                            remainingPercent: 72,
+                            windowMinutes: 300,
+                            resetsAt: now + 8_400
+                        ),
+                        weekly: UsageWindow(
+                            usedPercent: 56,
+                            remainingPercent: 44,
+                            windowMinutes: 10_080,
+                            resetsAt: now + 172_800
+                        ),
+                        credits: nil
+                    ),
+                    renewal: RenewalSnapshot(
+                        nextRenewalAt: "2026-05-01",
+                        source: "manual",
+                        updatedAt: now - 86_400,
+                        status: "ok"
+                    )
+                ),
+                Account(
+                    accountKey: "acct-backup",
+                    label: "备用账号",
+                    email: "backup@example.com",
+                    alias: "backup",
+                    accountName: "备用工作区",
+                    plan: "plus",
+                    authMode: "chatgpt",
+                    active: false,
+                    lastUsedAt: now - 86_400,
+                    lastUsageAt: now - 7_200,
+                    usage: nil,
+                    renewal: RenewalSnapshot(
+                        nextRenewalAt: "2026-05-18",
+                        source: "manual",
+                        updatedAt: now - 259_200,
+                        status: "ok"
+                    )
+                )
+            ],
+            apiProfiles: [
+                APIProfile(
+                    profileKey: "ccswitch-primary",
+                    label: "cc switch / OpenAI 主配置",
+                    modelProvider: "openai",
+                    providerName: "openai",
+                    model: "gpt-5.4",
+                    baseURL: "https://api.openai.com/v1",
+                    wireAPI: "responses",
+                    active: false,
+                    createdAt: now - 604_800,
+                    lastUsedAt: now - 43_200
+                ),
+                APIProfile(
+                    profileKey: "local-backup",
+                    label: "本地 API 备用配置",
+                    modelProvider: "openai",
+                    providerName: "openai",
+                    model: "gpt-5.4-mini",
+                    baseURL: "https://api.openai.com/v1",
+                    wireAPI: "responses",
+                    active: false,
+                    createdAt: now - 302_400,
+                    lastUsedAt: nil
+                )
+            ],
+            refresh: RefreshSummary(
+                usageRequested: false,
+                attempted: 1,
+                updated: 1,
+                failed: 0,
+                unchanged: 0,
+                localOnlyMode: true
+            )
+        )
+    }
+}

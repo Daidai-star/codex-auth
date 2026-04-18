@@ -39,6 +39,30 @@ final class AppModel: ObservableObject {
         load()
     }
 
+    init(previewState: CodexState, statusMessage: String) {
+        let client = CLIClient(
+            bundledPath: nil,
+            environment: [:],
+            isExecutable: { _ in false },
+            shellResolver: { _, _ in nil }
+        )
+        cliClient = client
+        webServer = LocalWebServer(cliClient: client)
+        state = previewState
+        self.statusMessage = statusMessage
+        isBusy = false
+        restartCodexAfterSwitch = false
+        restartCodexAfterSync = false
+        syncHistoryDuringSwitch = true
+    }
+
+    static func screenshotPreview() -> AppModel {
+        AppModel(
+            previewState: CodexState.screenshotPreviewSample(),
+            statusMessage: "文档截图预览"
+        )
+    }
+
     func load(refreshScope: UsageRefreshScope = .none) {
         isBusy = true
         statusMessage = loadingMessage(for: refreshScope)

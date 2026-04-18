@@ -1,12 +1,40 @@
 import AppKit
 import SwiftUI
 
+private let menuDashboardSize = CGSize(width: 392, height: 640)
+
 @main
 struct CodexAuthMenuApp: App {
-    @StateObject private var model = AppModel()
+    @StateObject private var model: AppModel
+    private let launchMode: LaunchMode
 
     init() {
-        NSApplication.shared.setActivationPolicy(.accessory)
+        let launchMode = LaunchMode.current
+        self.launchMode = launchMode
+        let appModel = launchMode.usesPreviewState
+            ? AppModel.screenshotPreview()
+            : AppModel()
+        _model = StateObject(
+            wrappedValue: appModel
+        )
+        NSApplication.shared.setActivationPolicy(
+            launchMode.activationPolicy
+        )
+        if launchMode.isScreenshotPreview {
+            DispatchQueue.main.async {
+                ScreenshotPreviewWindowController.shared.show(model: appModel)
+            }
+        }
+        if let outputURL = launchMode.snapshotOutputURL {
+            DispatchQueue.main.async {
+                do {
+                    try MenuDashboardSnapshotRenderer.render(to: outputURL, model: appModel)
+                } catch {
+                    fputs("Failed to render menu snapshot: \(error.localizedDescription)\n", stderr)
+                }
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     var body: some Scene {
@@ -14,6 +42,150 @@ struct CodexAuthMenuApp: App {
             MenuDashboard(model: model)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+private enum LaunchMode {
+    case standard
+    case screenshotPreview
+    case renderScreenshot(String)
+
+    static var current: LaunchMode {
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "--render-screenshot"),
+           arguments.indices.contains(index + 1)
+        {
+            return .renderScreenshot(arguments[index + 1])
+        }
+        if arguments.contains("--screenshot-preview") {
+            return .screenshotPreview
+        }
+        let environment = ProcessInfo.processInfo.environment
+        if environment["CODEX_AUTH_SCREENSHOT_MODE"] == "1" {
+            return .screenshotPreview
+        }
+        return .standard
+    }
+
+    var usesPreviewState: Bool {
+        switch self {
+        case .standard:
+            return false
+        case .screenshotPreview, .renderScreenshot:
+            return true
+        }
+    }
+
+    var isScreenshotPreview: Bool {
+        if case .screenshotPreview = self {
+            return true
+        }
+        return false
+    }
+
+    var activationPolicy: NSApplication.ActivationPolicy {
+        switch self {
+        case .standard, .renderScreenshot:
+            return .accessory
+        case .screenshotPreview:
+            return .regular
+        }
+    }
+
+    var snapshotOutputURL: URL? {
+        switch self {
+        case .renderScreenshot(let path):
+            return URL(fileURLWithPath: path)
+        case .standard, .screenshotPreview:
+            return nil
+        }
+    }
+}
+
+private final class ScreenshotPreviewWindowController {
+    static let shared = ScreenshotPreviewWindowController()
+
+    private var window: NSWindow?
+
+    func show(model: AppModel) {
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let hostingView = NSHostingView(
+            rootView: MenuDashboard(model: model)
+                .preferredColorScheme(.light)
+        )
+
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: menuDashboardSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.isMovableByWindowBackground = true
+        window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace]
+        window.contentView = hostingView
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.window = window
+    }
+}
+
+private enum MenuDashboardSnapshotRenderer {
+    static func render(to url: URL, model: AppModel) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let hostingView = NSHostingView(
+            rootView: MenuDashboard(model: model)
+                .preferredColorScheme(.light)
+        )
+        hostingView.frame = NSRect(origin: .zero, size: menuDashboardSize)
+
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: menuDashboardSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.contentView = hostingView
+        window.displayIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+
+        guard let bitmap = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
+            throw SnapshotRenderError.bitmapUnavailable
+        }
+        hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw SnapshotRenderError.pngEncodingFailed
+        }
+        try data.write(to: url)
+    }
+}
+
+private enum SnapshotRenderError: LocalizedError {
+    case bitmapUnavailable
+    case pngEncodingFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .bitmapUnavailable:
+            return "Could not create a bitmap buffer for the menu snapshot."
+        case .pngEncodingFailed:
+            return "Could not encode the menu snapshot as PNG."
+        }
     }
 }
 
@@ -55,7 +227,7 @@ private struct MenuDashboard: View {
 
             FixedFooterBar(model: model)
         }
-        .frame(width: 392, height: 640)
+        .frame(width: menuDashboardSize.width, height: menuDashboardSize.height)
         .background(.regularMaterial)
     }
 }
