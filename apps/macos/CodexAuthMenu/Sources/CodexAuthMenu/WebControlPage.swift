@@ -543,6 +543,12 @@ enum WebControlPage {
       margin-top: 12px;
     }
 
+    .panel-stack {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
     .button {
       align-items: center;
       background: var(--surface);
@@ -770,6 +776,15 @@ enum WebControlPage {
         </div>
 
         <section class="accounts" id="accounts" aria-live="polite"></section>
+
+        <div class="pane-head" style="margin-top: 28px;">
+          <div>
+            <p class="section-kicker">API 配置</p>
+            <h2 class="pane-title">把当前 API 密钥配置收成档案，切换时就像翻页一样干净。</h2>
+          </div>
+        </div>
+
+        <section class="accounts" id="apiProfiles" aria-live="polite"></section>
       </section>
 
       <aside class="side-rail" aria-label="操作">
@@ -812,6 +827,22 @@ enum WebControlPage {
         </section>
 
         <section class="panel">
+          <h2 class="panel-title">保存当前 API 配置</h2>
+          <p class="panel-copy" id="apiProfileNote">先用 cc switch 或手动方式把 Codex 切到 API 密钥模式，再把当前配置保存成一个可切换档案。</p>
+          <div class="panel-stack">
+            <input
+              class="search-input"
+              id="apiProfileLabel"
+              type="text"
+              autocomplete="off"
+              placeholder="例如：CPA / OpenAI 本地"
+            >
+            <button class="button secondary" id="importCCSwitch">从 cc switch 导入</button>
+            <button class="button primary" id="saveAPIProfile">保存当前 API 配置</button>
+          </div>
+        </section>
+
+        <section class="panel">
           <h2 class="panel-title">风险开关</h2>
           <p class="panel-copy" id="apiConfigNote">默认全部关闭；只有你主动开启时，才会对更多账号调用相关接口。</p>
           <label class="toggle">
@@ -834,11 +865,25 @@ enum WebControlPage {
         </section>
 
         <section class="panel">
-          <h2 class="panel-title">切换之后</h2>
+          <h2 class="panel-title">历史同步</h2>
           <p class="preference-note" id="preferenceNote">官方 Codex App 会尽快跟上新账号；终端里的 Codex CLI 会话仍需重新进入。</p>
           <label class="toggle">
             <span class="toggle-copy" id="toggleLabel">正在读取</span>
             <input id="restartToggle" type="checkbox">
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+          <label class="toggle">
+            <span class="toggle-copy" id="restartAfterSyncLabel">正在读取</span>
+            <input id="restartAfterSyncToggle" type="checkbox">
+            <span class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </span>
+          </label>
+          <label class="toggle">
+            <span class="toggle-copy" id="syncDuringSwitchLabel">正在读取</span>
+            <input id="syncDuringSwitchToggle" type="checkbox">
             <span class="toggle-track">
               <span class="toggle-thumb"></span>
             </span>
@@ -852,12 +897,16 @@ enum WebControlPage {
     const token = new URLSearchParams(location.search).get("token") || "";
     const state = {
       accounts: [],
+      apiProfiles: [],
       api: null,
+      activeAuthMode: null,
       query: "",
       busy: false,
       preferenceBusy: false,
       apiBusy: false,
-      restartCodexAfterSwitch: true
+      restartCodexAfterSwitch: true,
+      restartCodexAfterSync: true,
+      syncHistoryDuringSwitch: true
     };
 
     const brandIconEl = document.getElementById("brandIcon");
@@ -867,6 +916,7 @@ enum WebControlPage {
     const statusChipEl = document.getElementById("statusChip");
     const statusEl = document.getElementById("status");
     const accountsEl = document.getElementById("accounts");
+    const apiProfilesEl = document.getElementById("apiProfiles");
     const searchEl = document.getElementById("search");
     const addAccountEl = document.getElementById("addAccount");
     const deviceAuthEl = document.getElementById("deviceAuth");
@@ -878,7 +928,11 @@ enum WebControlPage {
     const refreshAllEl = document.getElementById("refreshAll");
     const syncHistoryEl = document.getElementById("syncHistory");
     const restartToggleEl = document.getElementById("restartToggle");
+    const restartAfterSyncToggleEl = document.getElementById("restartAfterSyncToggle");
+    const syncDuringSwitchToggleEl = document.getElementById("syncDuringSwitchToggle");
     const toggleLabelEl = document.getElementById("toggleLabel");
+    const restartAfterSyncLabelEl = document.getElementById("restartAfterSyncLabel");
+    const syncDuringSwitchLabelEl = document.getElementById("syncDuringSwitchLabel");
     const preferenceNoteEl = document.getElementById("preferenceNote");
     const accountCountEl = document.getElementById("accountCount");
     const modeValueEl = document.getElementById("modeValue");
@@ -886,6 +940,10 @@ enum WebControlPage {
     const usageApiToggleEl = document.getElementById("usageApiToggle");
     const usageApiLabelEl = document.getElementById("usageApiLabel");
     const apiConfigNoteEl = document.getElementById("apiConfigNote");
+    const apiProfileLabelEl = document.getElementById("apiProfileLabel");
+    const importCCSwitchEl = document.getElementById("importCCSwitch");
+    const saveAPIProfileEl = document.getElementById("saveAPIProfile");
+    const apiProfileNoteEl = document.getElementById("apiProfileNote");
 
     brandIconEl.src = `/app-icon.png?token=${encodeURIComponent(token)}`;
 
@@ -911,7 +969,12 @@ enum WebControlPage {
       refreshAllEl.disabled = disabled || !state.api || state.api.usage !== true;
       syncHistoryEl.disabled = disabled;
       restartToggleEl.disabled = disabled || state.preferenceBusy;
+      restartAfterSyncToggleEl.disabled = disabled || state.preferenceBusy;
+      syncDuringSwitchToggleEl.disabled = disabled || state.preferenceBusy;
       usageApiToggleEl.disabled = disabled || state.apiBusy;
+      apiProfileLabelEl.disabled = disabled || state.activeAuthMode !== "apikey";
+      importCCSwitchEl.disabled = disabled;
+      saveAPIProfileEl.disabled = disabled || state.activeAuthMode !== "apikey";
     }
 
     async function api(path, options = {}) {
@@ -944,6 +1007,18 @@ enum WebControlPage {
     }
 
     function compareAccounts(left, right) {
+      if (!!left.active !== !!right.active) {
+        return left.active ? -1 : 1;
+      }
+      const leftLastUsed = left.last_used_at || 0;
+      const rightLastUsed = right.last_used_at || 0;
+      if (leftLastUsed !== rightLastUsed) {
+        return rightLastUsed - leftLastUsed;
+      }
+      return String(left.label || "").localeCompare(String(right.label || ""), "zh-CN");
+    }
+
+    function compareAPIProfiles(left, right) {
       if (!!left.active !== !!right.active) {
         return left.active ? -1 : 1;
       }
@@ -1065,9 +1140,18 @@ enum WebControlPage {
       }
     }
 
-    function renderMetaLine(active) {
+    function renderMetaLine(active, activeAPIProfile) {
       const usageMode = state.api && state.api.usage ? "API" : "本地";
       if (!active) {
+        if (state.activeAuthMode === "apikey") {
+          const subtitle = activeAPIProfile
+            ? [activeAPIProfile.provider_name, activeAPIProfile.model_provider, activeAPIProfile.model, activeAPIProfile.base_url]
+                .filter(Boolean)
+                .join(" · ")
+            : "当前配置还没有保存成档案";
+          metaLineEl.textContent = `API 密钥模式 · ${subtitle || "当前配置还没有保存成档案"} · 切换后仍建议让 Codex App 重新载入。`;
+          return;
+        }
         metaLineEl.textContent = `${usageMode} 模式 · 续费日使用手动记录和提醒。先添加一个账号，我们就能开始切换。`;
         return;
       }
@@ -1078,10 +1162,14 @@ enum WebControlPage {
 
     function renderPreferences() {
       restartToggleEl.checked = state.restartCodexAfterSwitch;
-      toggleLabelEl.textContent = state.restartCodexAfterSwitch ? "已开启" : "已关闭";
-      preferenceNoteEl.textContent = state.restartCodexAfterSwitch
-        ? "官方 Codex App 会尽快跟上新账号；终端里的 Codex CLI 会话仍需重新进入。"
-        : "切换后只更新登录态，你可以自己决定什么时候重新打开 Codex。";
+      restartAfterSyncToggleEl.checked = state.restartCodexAfterSync;
+      syncDuringSwitchToggleEl.checked = state.syncHistoryDuringSwitch;
+      toggleLabelEl.textContent = `切换后重启：${state.restartCodexAfterSwitch ? "已开启" : "已关闭"}`;
+      restartAfterSyncLabelEl.textContent = `同步后重启：${state.restartCodexAfterSync ? "已开启" : "已关闭"}`;
+      syncDuringSwitchLabelEl.textContent = `切换时同步历史：${state.syncHistoryDuringSwitch ? "已开启" : "已关闭"}`;
+      preferenceNoteEl.textContent = state.syncHistoryDuringSwitch
+        ? "账号和 API 配置共用同一套历史；切换时会自动同步，手动同步后可自动重启 Codex App 让侧边栏立即刷新。"
+        : "账号和 API 配置仍共用同一套历史；只是切换过程暂不自动同步，你可以手动点“同步历史会话”。";
     }
 
     function renderAPIConfig() {
@@ -1091,13 +1179,18 @@ enum WebControlPage {
       apiConfigNoteEl.textContent = api.usage
         ? "已允许刷新全部账号额度和账号名接口。关闭后，全部额度刷新会被禁用。"
         : "默认只保留本地同步；续费日只做手动记录和到期提醒。";
+      apiProfileNoteEl.textContent = state.activeAuthMode === "apikey"
+        ? "当前已经是 API 密钥模式，可以把这份 auth.json + config.toml 保存成档案。"
+        : "先用 cc switch 或手动方式把 Codex 切到 API 密钥模式，再把当前配置保存成一个可切换档案。";
     }
 
     function renderStatusMetrics() {
       accountCountEl.textContent = String(state.accounts.length);
       const localMode = !state.api || state.api.usage === false;
-      modeValueEl.textContent = localMode ? "本地" : "API";
-      sourceChipEl.textContent = localMode ? "本地额度" : "API 额度";
+      modeValueEl.textContent = state.activeAuthMode === "apikey" ? "API 密钥" : (localMode ? "本地" : "API");
+      sourceChipEl.textContent = state.activeAuthMode === "apikey"
+        ? "API 密钥"
+        : (localMode ? "本地额度" : "API 额度");
     }
 
     function daysUntil(dateString) {
@@ -1272,6 +1365,90 @@ enum WebControlPage {
       }
     }
 
+    function renderAPIProfiles() {
+      apiProfilesEl.replaceChildren();
+      const profiles = state.apiProfiles.slice().sort(compareAPIProfiles);
+      if (profiles.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = "还没有 API 配置档案。";
+        apiProfilesEl.appendChild(empty);
+        return;
+      }
+
+      for (const profile of profiles) {
+        const tile = document.createElement("article");
+        tile.className = `account-card${profile.active ? " active" : ""}`;
+
+        const header = document.createElement("div");
+        header.className = "account-header";
+
+        const titleWrap = document.createElement("div");
+        const title = document.createElement("h2");
+        title.className = "account-title";
+        title.textContent = profile.label;
+        const subtitle = document.createElement("div");
+        subtitle.className = "account-subtitle";
+        subtitle.textContent = [profile.provider_name, profile.model_provider, profile.model, profile.base_url]
+          .filter(Boolean)
+          .join(" · ") || "已保存的 API 配置档案";
+        titleWrap.append(title, subtitle);
+
+        const pills = document.createElement("div");
+        pills.className = "pill-row";
+        if (profile.active) {
+          const activePill = document.createElement("span");
+          activePill.className = "pill active";
+          activePill.textContent = "当前";
+          pills.appendChild(activePill);
+        }
+        const modePill = document.createElement("span");
+        modePill.className = "pill mode";
+        modePill.textContent = "apikey";
+        pills.appendChild(modePill);
+        const sourcePill = document.createElement("span");
+        sourcePill.className = "pill";
+        sourcePill.textContent = profile.profile_key && profile.profile_key.startsWith("ccswitch-")
+          ? "cc switch"
+          : "本地保存";
+        pills.appendChild(sourcePill);
+        if (profile.model) {
+          const modelPill = document.createElement("span");
+          modelPill.className = "pill plan";
+          modelPill.textContent = profile.model;
+          pills.appendChild(modelPill);
+        }
+        header.append(titleWrap, pills);
+
+        const foot = document.createElement("div");
+        foot.className = "account-foot";
+
+        const meta = document.createElement("div");
+        meta.className = "account-meta";
+        const summary = document.createElement("div");
+        summary.className = "account-sync";
+        summary.textContent = profile.wire_api
+          ? `接口类型：${profile.wire_api}`
+          : "接口类型：未标记";
+        const time = document.createElement("div");
+        time.className = "account-time";
+        time.textContent = profile.last_used_at
+          ? `上次切换：${formatDate(profile.last_used_at)}`
+          : "还没有切换记录";
+        meta.append(summary, time);
+
+        const action = document.createElement("button");
+        action.className = `button ${profile.active ? "secondary" : "primary"} account-action`;
+        action.textContent = profile.active ? "已选中" : "切换";
+        action.disabled = profile.active || state.busy;
+        action.addEventListener("click", () => switchAPIProfile(profile.profile_key));
+
+        foot.append(meta, action);
+        tile.append(header, foot);
+        apiProfilesEl.appendChild(tile);
+      }
+    }
+
     function createUsageBlock(label, value, percent, tone) {
       const block = document.createElement("div");
       block.className = "usage-block";
@@ -1300,17 +1477,33 @@ enum WebControlPage {
       if (payload && Array.isArray(payload.accounts)) {
         state.accounts = payload.accounts;
       }
+      if (payload && Array.isArray(payload.api_profiles)) {
+        state.apiProfiles = payload.api_profiles;
+      }
       if (payload && payload.api) {
         state.api = payload.api;
       }
+      if (payload && Object.prototype.hasOwnProperty.call(payload, "active_auth_mode")) {
+        state.activeAuthMode = payload.active_auth_mode;
+      }
 
       const active = state.accounts.find((account) => account.active);
-      activeLineEl.textContent = active ? `当前账号：${active.label}` : "同步本地状态，然后切换到下一个账号。";
-      renderMetaLine(active);
+      const activeAPIProfile = state.apiProfiles.find((profile) => profile.active);
+      if (active) {
+        activeLineEl.textContent = `当前账号：${active.label}`;
+      } else if (state.activeAuthMode === "apikey") {
+        activeLineEl.textContent = activeAPIProfile
+          ? `当前 API 配置：${activeAPIProfile.label}`
+          : "当前是 API 密钥模式";
+      } else {
+        activeLineEl.textContent = "同步本地状态，然后切换到下一个账号。";
+      }
+      renderMetaLine(active, activeAPIProfile);
       renderPreferences();
       renderAPIConfig();
       renderStatusMetrics();
       renderAccounts();
+      renderAPIProfiles();
       syncControls();
     }
 
@@ -1329,7 +1522,7 @@ enum WebControlPage {
       syncControls();
       try {
         const { payload } = await api("/api/preferences");
-        state.restartCodexAfterSwitch = !!(payload && payload.restart_codex_after_switch);
+        applyPreferencesPayload(payload);
         renderPreferences();
       } catch (error) {
         setStatus(error.message || "读取偏好失败", "error");
@@ -1339,27 +1532,54 @@ enum WebControlPage {
       }
     }
 
-    async function savePreferences(enabled) {
+    function applyPreferencesPayload(payload) {
+      if (!payload) return;
+      if (Object.prototype.hasOwnProperty.call(payload, "restart_codex_after_switch")) {
+        state.restartCodexAfterSwitch = !!payload.restart_codex_after_switch;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, "restart_codex_after_sync")) {
+        state.restartCodexAfterSync = !!payload.restart_codex_after_sync;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, "sync_history_during_switch")) {
+        state.syncHistoryDuringSwitch = !!payload.sync_history_during_switch;
+      }
+    }
+
+    function preferenceRequestBody(changes) {
+      const body = {};
+      if (Object.prototype.hasOwnProperty.call(changes, "restartCodexAfterSwitch")) {
+        body.restart_codex_after_switch = changes.restartCodexAfterSwitch;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, "restartCodexAfterSync")) {
+        body.restart_codex_after_sync = changes.restartCodexAfterSync;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, "syncHistoryDuringSwitch")) {
+        body.sync_history_during_switch = changes.syncHistoryDuringSwitch;
+      }
+      return body;
+    }
+
+    async function savePreferences(changes) {
+      const previous = {
+        restartCodexAfterSwitch: state.restartCodexAfterSwitch,
+        restartCodexAfterSync: state.restartCodexAfterSync,
+        syncHistoryDuringSwitch: state.syncHistoryDuringSwitch
+      };
       state.preferenceBusy = true;
-      state.restartCodexAfterSwitch = enabled;
+      Object.assign(state, changes);
       renderPreferences();
       syncControls();
       try {
         const { payload } = await api("/api/preferences", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ restart_codex_after_switch: enabled })
+          body: JSON.stringify(preferenceRequestBody(changes))
         });
-        state.restartCodexAfterSwitch = !!(payload && payload.restart_codex_after_switch);
+        applyPreferencesPayload(payload);
         renderPreferences();
-        setStatus(
-          state.restartCodexAfterSwitch
-            ? "已开启自动重启 Codex App。"
-            : "已关闭自动重启 Codex App。",
-          "success"
-        );
+        setStatus("历史同步偏好已更新。", "success");
       } catch (error) {
-        state.restartCodexAfterSwitch = !enabled;
+        Object.assign(state, previous);
         renderPreferences();
         setStatus(error.message || "保存偏好失败", "error");
       } finally {
@@ -1506,7 +1726,7 @@ enum WebControlPage {
         const { payload } = await api("/api/sync-history", { method: "POST" });
         setStatus(
           (payload && payload.message) || "历史会话已同步。",
-          payload && payload.mirrored_threads > 0 ? "success" : "neutral"
+          payload && (payload.provider_updated_threads > 0 || payload.indexed_threads > 0) ? "success" : "neutral"
         );
       } catch (error) {
         setStatus(error.message || "同步历史会话失败", "error");
@@ -1570,9 +1790,83 @@ enum WebControlPage {
         const tone = restartResult === "restarted" || restartResult === "disabled"
           ? "success"
           : "warning";
-        setStatus(switchMessage(restartResult), tone);
+        setStatus(
+          `${switchMessage(restartResult)}${state.syncHistoryDuringSwitch ? "历史会话已随切换同步。" : "切换时历史同步已关闭。"}`,
+          tone
+        );
       } catch (error) {
         setStatus(error.message || "切换失败", "error");
+      } finally {
+        state.busy = false;
+        render();
+      }
+    }
+
+    async function captureAPIProfile() {
+      const label = (apiProfileLabelEl.value || "").trim();
+      if (!label) {
+        setStatus("请先填写一个 API 配置名称。", "warning");
+        return;
+      }
+      state.busy = true;
+      syncControls();
+      setStatus("正在保存当前 API 配置", "neutral");
+      try {
+        const { payload } = await api("/api/api-profiles/capture", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label })
+        });
+        apiProfileLabelEl.value = "";
+        render(payload);
+        setStatus(`当前 API 配置已保存：${label}`, "success");
+      } catch (error) {
+        setStatus(error.message || "保存 API 配置失败", "error");
+      } finally {
+        state.busy = false;
+        render();
+      }
+    }
+
+    async function importCCSwitchProfiles() {
+      state.busy = true;
+      syncControls();
+      setStatus("正在从 cc switch 导入 API 配置", "neutral");
+      try {
+        const { payload } = await api("/api/api-profiles/import-cc-switch", {
+          method: "POST"
+        });
+        render(payload);
+        setStatus("已从 cc switch 导入 API 配置。", "success");
+      } catch (error) {
+        setStatus(error.message || "导入 cc switch 配置失败", "error");
+      } finally {
+        state.busy = false;
+        render();
+      }
+    }
+
+    async function switchAPIProfile(profileKey) {
+      state.busy = true;
+      syncControls();
+      setStatus("正在切换 API 配置", "neutral");
+      try {
+        const { payload, response } = await api("/api/api-profiles/switch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ profile_key: profileKey })
+        });
+        render(payload);
+        const restartResult = response.headers.get("X-Codex-Restart-Result");
+        const tone = restartResult === "restarted" || restartResult === "disabled"
+          ? "success"
+          : "warning";
+        setStatus(
+          `${switchMessage(restartResult)}${state.syncHistoryDuringSwitch ? "历史会话已随切换同步。" : "切换时历史同步已关闭。"}`,
+          tone
+        );
+      } catch (error) {
+        setStatus(error.message || "切换 API 配置失败", "error");
       } finally {
         state.busy = false;
         render();
@@ -1592,10 +1886,20 @@ enum WebControlPage {
     refreshCurrentEl.addEventListener("click", () => load("refreshCurrent"));
     refreshAllEl.addEventListener("click", () => load("refreshAll"));
     syncHistoryEl.addEventListener("click", () => syncHistory());
-    restartToggleEl.addEventListener("change", () => savePreferences(restartToggleEl.checked));
+    restartToggleEl.addEventListener("change", () => savePreferences({
+      restartCodexAfterSwitch: restartToggleEl.checked
+    }));
+    restartAfterSyncToggleEl.addEventListener("change", () => savePreferences({
+      restartCodexAfterSync: restartAfterSyncToggleEl.checked
+    }));
+    syncDuringSwitchToggleEl.addEventListener("change", () => savePreferences({
+      syncHistoryDuringSwitch: syncDuringSwitchToggleEl.checked
+    }));
     usageApiToggleEl.addEventListener("change", () => saveAPIConfig({
       usage_account_enabled: usageApiToggleEl.checked
     }));
+    importCCSwitchEl.addEventListener("click", () => importCCSwitchProfiles());
+    saveAPIProfileEl.addEventListener("click", () => captureAPIProfile());
     render();
     Promise.all([loadPreferences(), loadHealth()]).finally(() => load("state"));
   </script>

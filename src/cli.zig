@@ -52,6 +52,26 @@ pub const SwitchOptions = struct {
     account_key: ?[]u8,
     json: bool = false,
 };
+pub const ApiProfileCaptureOptions = struct {
+    label: []u8,
+    json: bool = false,
+};
+pub const ApiProfileSwitchOptions = struct {
+    profile_key: []u8,
+    json: bool = false,
+};
+pub const ApiProfileImportCcSwitchOptions = struct {
+    provider_id: ?[]u8 = null,
+    db_path: ?[]u8 = null,
+    current: bool = false,
+    all: bool = false,
+    json: bool = false,
+};
+pub const ApiProfileOptions = union(enum) {
+    capture: ApiProfileCaptureOptions,
+    switch_profile: ApiProfileSwitchOptions,
+    import_cc_switch: ApiProfileImportCcSwitchOptions,
+};
 pub const RemoveOptions = struct {
     query: ?[]u8,
     all: bool,
@@ -95,6 +115,7 @@ pub const HelpTopic = enum {
     login,
     import_auth,
     switch_account,
+    api_profile,
     renewal,
     remove_account,
     clean,
@@ -108,6 +129,7 @@ pub const Command = union(enum) {
     login: LoginOptions,
     import_auth: ImportOptions,
     switch_account: SwitchOptions,
+    api_profile: ApiProfileOptions,
     renewal: RenewalOptions,
     remove_account: RemoveOptions,
     clean: CleanOptions,
@@ -364,6 +386,239 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Pars
         return .{ .command = .{ .switch_account = .{ .query = query, .account_key = account_key, .json = json } } };
     }
 
+    if (std.mem.eql(u8, cmd, "api-profile")) {
+        if (args.len == 3 and isHelpFlag(std.mem.sliceTo(args[2], 0))) {
+            return .{ .command = .{ .help = .api_profile } };
+        }
+        if (args.len < 3) return usageErrorResult(allocator, .api_profile, "`api-profile` requires an action.", .{});
+
+        const action = std.mem.sliceTo(args[2], 0);
+        var label: ?[]u8 = null;
+        var profile_key: ?[]u8 = null;
+        var provider_id: ?[]u8 = null;
+        var db_path: ?[]u8 = null;
+        var current = false;
+        var all = false;
+        var json = false;
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            const arg = std.mem.sliceTo(args[i], 0);
+            if (std.mem.eql(u8, arg, "--label")) {
+                if (i + 1 >= args.len) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "missing value for `--label`.", .{});
+                }
+                if (label != null) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "duplicate `--label` for `api-profile`.", .{});
+                }
+                label = try allocator.dupe(u8, std.mem.sliceTo(args[i + 1], 0));
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--profile-key")) {
+                if (i + 1 >= args.len) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "missing value for `--profile-key`.", .{});
+                }
+                if (profile_key != null) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "duplicate `--profile-key` for `api-profile`.", .{});
+                }
+                profile_key = try allocator.dupe(u8, std.mem.sliceTo(args[i + 1], 0));
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--provider-id")) {
+                if (i + 1 >= args.len) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "missing value for `--provider-id`.", .{});
+                }
+                if (provider_id != null) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "duplicate `--provider-id` for `api-profile`.", .{});
+                }
+                provider_id = try allocator.dupe(u8, std.mem.sliceTo(args[i + 1], 0));
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--db-path")) {
+                if (i + 1 >= args.len) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "missing value for `--db-path`.", .{});
+                }
+                if (db_path != null) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "duplicate `--db-path` for `api-profile`.", .{});
+                }
+                db_path = try allocator.dupe(u8, std.mem.sliceTo(args[i + 1], 0));
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--current")) {
+                if (current) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "duplicate `--current` for `api-profile`.", .{});
+                }
+                current = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--all")) {
+                if (all) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "duplicate `--all` for `api-profile`.", .{});
+                }
+                all = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--json")) {
+                if (json) {
+                    if (label) |value| allocator.free(value);
+                    if (profile_key) |value| allocator.free(value);
+                    if (provider_id) |value| allocator.free(value);
+                    if (db_path) |value| allocator.free(value);
+                    return usageErrorResult(allocator, .api_profile, "duplicate `--json` for `api-profile`.", .{});
+                }
+                json = true;
+                continue;
+            }
+            if (std.mem.startsWith(u8, arg, "-")) {
+                if (label) |value| allocator.free(value);
+                if (profile_key) |value| allocator.free(value);
+                if (provider_id) |value| allocator.free(value);
+                if (db_path) |value| allocator.free(value);
+                return usageErrorResult(allocator, .api_profile, "unknown flag `{s}` for `api-profile`.", .{arg});
+            }
+            if (label) |value| allocator.free(value);
+            if (profile_key) |value| allocator.free(value);
+            if (provider_id) |value| allocator.free(value);
+            if (db_path) |value| allocator.free(value);
+            return usageErrorResult(allocator, .api_profile, "unexpected argument `{s}` for `api-profile`.", .{arg});
+        }
+
+        if (std.mem.eql(u8, action, "capture")) {
+            if (profile_key) |value| {
+                allocator.free(value);
+                if (label) |label_value| allocator.free(label_value);
+                if (provider_id) |provider_id_value| allocator.free(provider_id_value);
+                if (db_path) |db_path_value| allocator.free(db_path_value);
+                return usageErrorResult(allocator, .api_profile, "`--profile-key` is only valid for `api-profile switch`.", .{});
+            }
+            if (provider_id) |value| {
+                allocator.free(value);
+                if (label) |label_value| allocator.free(label_value);
+                if (db_path) |db_path_value| allocator.free(db_path_value);
+                return usageErrorResult(allocator, .api_profile, "`--provider-id` is only valid for `api-profile import-cc-switch`.", .{});
+            }
+            if (db_path) |value| {
+                allocator.free(value);
+                if (label) |label_value| allocator.free(label_value);
+                return usageErrorResult(allocator, .api_profile, "`--db-path` is only valid for `api-profile import-cc-switch`.", .{});
+            }
+            if (current or all) {
+                if (label) |label_value| allocator.free(label_value);
+                return usageErrorResult(allocator, .api_profile, "`--current` and `--all` are only valid for `api-profile import-cc-switch`.", .{});
+            }
+            if (label == null) return usageErrorResult(allocator, .api_profile, "`api-profile capture` requires `--label`.", .{});
+            return .{ .command = .{ .api_profile = .{ .capture = .{
+                .label = label.?,
+                .json = json,
+            } } } };
+        }
+        if (std.mem.eql(u8, action, "switch")) {
+            if (label) |value| {
+                allocator.free(value);
+                if (profile_key) |profile_key_value| allocator.free(profile_key_value);
+                if (provider_id) |provider_id_value| allocator.free(provider_id_value);
+                if (db_path) |db_path_value| allocator.free(db_path_value);
+                return usageErrorResult(allocator, .api_profile, "`--label` is only valid for `api-profile capture`.", .{});
+            }
+            if (provider_id) |value| {
+                allocator.free(value);
+                if (profile_key) |profile_key_value| allocator.free(profile_key_value);
+                if (db_path) |db_path_value| allocator.free(db_path_value);
+                return usageErrorResult(allocator, .api_profile, "`--provider-id` is only valid for `api-profile import-cc-switch`.", .{});
+            }
+            if (db_path) |value| {
+                allocator.free(value);
+                if (profile_key) |profile_key_value| allocator.free(profile_key_value);
+                return usageErrorResult(allocator, .api_profile, "`--db-path` is only valid for `api-profile import-cc-switch`.", .{});
+            }
+            if (current or all) {
+                if (profile_key) |profile_key_value| allocator.free(profile_key_value);
+                return usageErrorResult(allocator, .api_profile, "`--current` and `--all` are only valid for `api-profile import-cc-switch`.", .{});
+            }
+            if (profile_key == null) return usageErrorResult(allocator, .api_profile, "`api-profile switch` requires `--profile-key`.", .{});
+            return .{ .command = .{ .api_profile = .{ .switch_profile = .{
+                .profile_key = profile_key.?,
+                .json = json,
+            } } } };
+        }
+        if (std.mem.eql(u8, action, "import-cc-switch")) {
+            if (label) |value| {
+                allocator.free(value);
+                if (profile_key) |profile_key_value| allocator.free(profile_key_value);
+                if (provider_id) |provider_id_value| allocator.free(provider_id_value);
+                if (db_path) |db_path_value| allocator.free(db_path_value);
+                return usageErrorResult(allocator, .api_profile, "`--label` is only valid for `api-profile capture`.", .{});
+            }
+            if (profile_key) |value| {
+                allocator.free(value);
+                if (provider_id) |provider_id_value| allocator.free(provider_id_value);
+                if (db_path) |db_path_value| allocator.free(db_path_value);
+                return usageErrorResult(allocator, .api_profile, "`--profile-key` is only valid for `api-profile switch`.", .{});
+            }
+            if ((if (provider_id != null) @as(u8, 1) else 0) + (if (current) @as(u8, 1) else 0) + (if (all) @as(u8, 1) else 0) > 1) {
+                if (provider_id) |provider_id_value| allocator.free(provider_id_value);
+                if (db_path) |db_path_value| allocator.free(db_path_value);
+                return usageErrorResult(allocator, .api_profile, "`api-profile import-cc-switch` accepts only one selector: `--provider-id`, `--current`, or `--all`.", .{});
+            }
+            return .{ .command = .{ .api_profile = .{ .import_cc_switch = .{
+                .provider_id = provider_id,
+                .db_path = db_path,
+                .current = current,
+                .all = all,
+                .json = json,
+            } } } };
+        }
+
+        if (label) |value| allocator.free(value);
+        if (profile_key) |value| allocator.free(value);
+        if (provider_id) |value| allocator.free(value);
+        if (db_path) |value| allocator.free(value);
+        return usageErrorResult(allocator, .api_profile, "unknown action `{s}` for `api-profile`.", .{action});
+    }
+
     if (std.mem.eql(u8, cmd, "renewal")) {
         if (args.len == 3 and isHelpFlag(std.mem.sliceTo(args[2], 0))) {
             return .{ .command = .{ .help = .renewal } };
@@ -608,6 +863,14 @@ fn freeCommand(allocator: std.mem.Allocator, cmd: *Command) void {
             if (opts.query) |e| allocator.free(e);
             if (opts.account_key) |key| allocator.free(key);
         },
+        .api_profile => |*opts| switch (opts.*) {
+            .capture => |*capture_opts| allocator.free(capture_opts.label),
+            .switch_profile => |*switch_opts| allocator.free(switch_opts.profile_key),
+            .import_cc_switch => |*import_opts| {
+                if (import_opts.provider_id) |value| allocator.free(value);
+                if (import_opts.db_path) |value| allocator.free(value);
+            },
+        },
         .renewal => |*opts| switch (opts.*) {
             .set => |*renewal_opts| {
                 allocator.free(renewal_opts.account_key);
@@ -677,6 +940,7 @@ fn helpTopicForName(name: []const u8) ?HelpTopic {
     if (std.mem.eql(u8, name, "login")) return .login;
     if (std.mem.eql(u8, name, "import")) return .import_auth;
     if (std.mem.eql(u8, name, "switch")) return .switch_account;
+    if (std.mem.eql(u8, name, "api-profile")) return .api_profile;
     if (std.mem.eql(u8, name, "renewal")) return .renewal;
     if (std.mem.eql(u8, name, "remove")) return .remove_account;
     if (std.mem.eql(u8, name, "clean")) return .clean;
@@ -756,6 +1020,7 @@ pub fn writeHelp(
         .{ .name = "login", .description = "Login and add the current account" },
         .{ .name = "import", .description = "Import auth files or rebuild registry" },
         .{ .name = "switch [<query>]", .description = "Switch the active account" },
+        .{ .name = "api-profile", .description = "Capture, import, and switch saved API-key profiles" },
         .{ .name = "renewal", .description = "Manage next renewal dates" },
         .{ .name = "remove [<query>|--all]", .description = "Remove one or more accounts" },
         .{ .name = "clean", .description = "Delete backup and stale files under accounts/" },
@@ -797,6 +1062,7 @@ pub fn writeHelp(
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[8].name, commands[8].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[9].name, commands[9].description);
     try writeHelpEntry(out, use_color, parent_indent, command_col, commands[10].name, commands[10].description);
+    try writeHelpEntry(out, use_color, parent_indent, command_col, commands[11].name, commands[11].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[0].name, config_details[0].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[1].name, config_details[1].description);
     try writeHelpEntry(out, use_color, child_indent, config_detail_col, config_details[2].name, config_details[2].description);
@@ -808,6 +1074,8 @@ pub fn writeHelp(
     try out.writeAll("  codex-auth switch\n");
     try out.writeAll("  codex-auth login --device-auth\n");
     try out.writeAll("  codex-auth import /path/to/auth.json --alias personal\n");
+    try out.writeAll("  codex-auth api-profile capture --label local-openai\n");
+    try out.writeAll("  codex-auth api-profile import-cc-switch --all\n");
     try out.writeAll("  codex-auth renewal set --account-key user::acct --date 2026-05-01\n");
 
     try writeHelpSectionTitle(out, use_color, "Notes");
@@ -924,6 +1192,7 @@ fn commandNameForTopic(topic: HelpTopic) []const u8 {
         .login => "login",
         .import_auth => "import",
         .switch_account => "switch",
+        .api_profile => "api-profile",
         .renewal => "renewal",
         .remove_account => "remove",
         .clean => "clean",
@@ -941,6 +1210,7 @@ fn commandDescriptionForTopic(topic: HelpTopic) []const u8 {
         .login => "Run `codex login` or `codex login --device-auth`, then add the current account.",
         .import_auth => "Import auth files or rebuild the registry.",
         .switch_account => "Switch the active account interactively or by query.",
+        .api_profile => "Capture the current API-key config, import cc-switch profiles, or switch to a saved API-key profile.",
         .renewal => "Manage manually recorded next-renewal dates.",
         .remove_account => "Remove one or more accounts.",
         .clean => "Delete backup and stale files under accounts/.",
@@ -952,7 +1222,7 @@ fn commandDescriptionForTopic(topic: HelpTopic) []const u8 {
 
 fn commandHelpHasExamples(topic: HelpTopic) bool {
     return switch (topic) {
-        .import_auth, .switch_account, .renewal, .remove_account, .config, .daemon => true,
+        .import_auth, .switch_account, .api_profile, .renewal, .remove_account, .config, .daemon => true,
         else => false,
     };
 }
@@ -983,6 +1253,11 @@ fn writeUsageSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth switch\n");
             try out.writeAll("  codex-auth switch <query>\n");
             try out.writeAll("  codex-auth switch --account-key <key> [--json]\n");
+        },
+        .api_profile => {
+            try out.writeAll("  codex-auth api-profile capture --label <label> [--json]\n");
+            try out.writeAll("  codex-auth api-profile switch --profile-key <key> [--json]\n");
+            try out.writeAll("  codex-auth api-profile import-cc-switch [--current | --all | --provider-id <id>] [--db-path <path>] [--json]\n");
         },
         .renewal => {
             try out.writeAll("  codex-auth renewal set --account-key <key> --date YYYY-MM-DD [--json]\n");
@@ -1040,6 +1315,11 @@ fn writeExamplesSection(out: *std.Io.Writer, topic: HelpTopic) !void {
             try out.writeAll("  codex-auth switch john@example.com\n");
             try out.writeAll("  codex-auth switch --account-key user-id::account-id --json\n");
         },
+        .api_profile => {
+            try out.writeAll("  codex-auth api-profile capture --label local-openai --json\n");
+            try out.writeAll("  codex-auth api-profile switch --profile-key api-1715000000-abcd1234 --json\n");
+            try out.writeAll("  codex-auth api-profile import-cc-switch --all --json\n");
+        },
         .renewal => {
             try out.writeAll("  codex-auth renewal set --account-key user-id::account-id --date 2026-05-01\n");
             try out.writeAll("  codex-auth renewal clear --account-key user-id::account-id --json\n");
@@ -1084,6 +1364,7 @@ fn helpCommandForTopic(topic: HelpTopic) []const u8 {
         .login => "codex-auth login --help",
         .import_auth => "codex-auth import --help",
         .switch_account => "codex-auth switch --help",
+        .api_profile => "codex-auth api-profile --help",
         .renewal => "codex-auth renewal --help",
         .remove_account => "codex-auth remove --help",
         .clean => "codex-auth clean --help",

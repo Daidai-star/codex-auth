@@ -65,7 +65,11 @@ enum TerminalLaunchResult: Sendable, Equatable {
 
 enum CodexMenuPreferences {
     private static let restartCodexAfterSwitchKey = "restartCodexAfterSwitch"
+    private static let restartCodexAfterSyncKey = "restartCodexAfterSync"
+    private static let syncHistoryDuringSwitchKey = "syncHistoryDuringSwitch"
     private static let restartCodexAfterSwitchDefault = true
+    private static let restartCodexAfterSyncDefault = true
+    private static let syncHistoryDuringSwitchDefault = true
 
     static func restartCodexAfterSwitch(userDefaults: UserDefaults = .standard) -> Bool {
         guard userDefaults.object(forKey: restartCodexAfterSwitchKey) != nil else {
@@ -74,8 +78,30 @@ enum CodexMenuPreferences {
         return userDefaults.bool(forKey: restartCodexAfterSwitchKey)
     }
 
+    static func restartCodexAfterSync(userDefaults: UserDefaults = .standard) -> Bool {
+        guard userDefaults.object(forKey: restartCodexAfterSyncKey) != nil else {
+            return restartCodexAfterSyncDefault
+        }
+        return userDefaults.bool(forKey: restartCodexAfterSyncKey)
+    }
+
+    static func syncHistoryDuringSwitch(userDefaults: UserDefaults = .standard) -> Bool {
+        guard userDefaults.object(forKey: syncHistoryDuringSwitchKey) != nil else {
+            return syncHistoryDuringSwitchDefault
+        }
+        return userDefaults.bool(forKey: syncHistoryDuringSwitchKey)
+    }
+
     static func setRestartCodexAfterSwitch(_ value: Bool, userDefaults: UserDefaults = .standard) {
         userDefaults.set(value, forKey: restartCodexAfterSwitchKey)
+    }
+
+    static func setRestartCodexAfterSync(_ value: Bool, userDefaults: UserDefaults = .standard) {
+        userDefaults.set(value, forKey: restartCodexAfterSyncKey)
+    }
+
+    static func setSyncHistoryDuringSwitch(_ value: Bool, userDefaults: UserDefaults = .standard) {
+        userDefaults.set(value, forKey: syncHistoryDuringSwitchKey)
     }
 }
 
@@ -217,6 +243,33 @@ enum CodexDesktopController {
         case .failed:
             return "已切换，但自动重启 Codex App 失败；终端里的 Codex CLI 会话仍需手动重新进入。"
         }
+    }
+
+    static func historySyncStatusMessage(
+        summary: HistorySyncSummary,
+        restartResult: CodexAppRestartResult
+    ) -> String {
+        let syncMessage: String
+        if summary.providerUpdatedThreads > 0 || summary.indexedThreads > 0 {
+            syncMessage = "历史会话同步完成：更新 \(summary.providerUpdatedThreads) 条会话归属，补齐 \(summary.indexedThreads) 条历史索引。"
+        } else {
+            syncMessage = "历史会话已检查：没有需要更新的会话归属或历史索引。"
+        }
+
+        let restartMessage: String
+        switch restartResult {
+        case .disabled:
+            restartMessage = "当前未开启同步后自动重启 Codex App。"
+        case .restarted:
+            restartMessage = "Codex App 已自动重启，侧边栏会重新读取历史。"
+        case .notRunning:
+            restartMessage = "Codex App 当前未打开，下次启动时会读取这套历史。"
+        case .notInstalled:
+            restartMessage = "未找到 Codex App，无法自动重启。"
+        case .failed:
+            restartMessage = "自动重启 Codex App 失败，可以手动重启一次。"
+        }
+        return "\(syncMessage)\(restartMessage)"
     }
 
     private static func codexAppURLOrNil() -> URL? {

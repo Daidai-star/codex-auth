@@ -92,6 +92,35 @@ fn makeEmptyRegistry() registry.Registry {
     };
 }
 
+fn sqlite3Available(allocator: std.mem.Allocator) bool {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "sqlite3", "--version" },
+        .max_output_bytes = 4096,
+    }) catch return false;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    return switch (result.term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+}
+
+fn runSqliteStatement(allocator: std.mem.Allocator, db_path: []const u8, sql: []const u8) !void {
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "sqlite3", "-batch", "-noheader", db_path, sql },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .Exited => |code| if (code == 0) return,
+        else => {},
+    }
+    return error.CommandFailed;
+}
+
 fn makeAccountRecord(
     allocator: std.mem.Allocator,
     email: []const u8,
@@ -1359,4 +1388,131 @@ test "import cpa path with directory imports multiple json files and skips bad f
     try std.testing.expect(report.skipped == 2);
     try std.testing.expect(report.total_files == 4);
     try std.testing.expectEqual(@as(usize, 2), reg.accounts.items.len);
+}
+
+test "import cc-switch api profiles stores only API-key providers" {
+    const gpa = std.testing.allocator;
+    if (!sqlite3Available(gpa)) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("codex-home/accounts");
+    const codex_home = try tmp.dir.realpathAlloc(gpa, "codex-home");
+    defer gpa.free(codex_home);
+    const root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(root);
+    const db_path = try std.fs.path.join(gpa, &[_][]const u8{ root, "cc-switch.db" });
+    defer gpa.free(db_path);
+
+    const setup_sql =
+        \\CREATE TABLE providers (
+        \\  id TEXT NOT NULL,
+        \\  app_type TEXT NOT NULL,
+        \\  name TEXT NOT NULL,
+        \\  settings_config TEXT NOT NULL,
+        \\  website_url TEXT,
+        \\  category TEXT,
+        \\  created_at INTEGER,
+        \\  sort_index INTEGER,
+        \\  notes TEXT,
+        \\  icon TEXT,
+        \\  icon_color TEXT,
+        \\  meta TEXT NOT NULL DEFAULT '{}',
+        \\  is_current BOOLEAN NOT NULL DEFAULT 0,
+        \\  in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+        \\  cost_multiplier TEXT NOT NULL DEFAULT '1.0',
+        \\  limit_daily_usd TEXT,
+        \\  limit_monthly_usd TEXT,
+        \\  provider_type TEXT,
+        \\  PRIMARY KEY (id, app_type)
+        \\);
+        \\INSERT INTO providers (id, app_type, name, settings_config, created_at, sort_index, is_current) VALUES
+        \\('provider-cpa', 'codex', 'CPA', '{"auth":{"OPENAI_API_KEY":"sk-test"},"config":"model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n\n[model_providers]\n[model_providers.custom]\nname = \"openai\"\nwire_api = \"responses\"\nbase_url = \"http://localhost:8317/v1\"\n"}', 1, 1, 1),
+        \\('provider-official', 'codex', 'Official', '{"auth":{},"config":""}', 2, 2, 0);
+    ;
+    try runSqliteStatement(gpa, db_path, setup_sql);
+
+    var reg = makeEmptyRegistry();
+    defer reg.deinit(gpa);
+
+    const summary = try registry.importCcSwitchApiProfiles(gpa, codex_home, &reg, db_path, .all);
+    try std.testing.expectEqual(@as(usize, 1), summary.imported);
+    try std.testing.expectEqual(@as(usize, 0), summary.updated);
+    try std.testing.expectEqual(@as(usize, 1), summary.skipped);
+    try std.testing.expectEqual(@as(usize, 1), reg.api_profiles.items.len);
+    try std.testing.expectEqualStrings("ccswitch-provider-cpa", reg.api_profiles.items[0].profile_key);
+    try std.testing.expectEqualStrings("CPA", reg.api_profiles.items[0].label);
+    try std.testing.expectEqualStrings("custom", reg.api_profiles.items[0].model_provider.?);
+    try std.testing.expectEqualStrings("openai", reg.api_profiles.items[0].provider_name.?);
+    try std.testing.expectEqualStrings("responses", reg.api_profiles.items[0].wire_api.?);
+
+    const auth_path = try registry.apiProfileAuthPath(gpa, codex_home, reg.api_profiles.items[0].profile_key);
+    defer gpa.free(auth_path);
+    const auth_data = try bdd.readFileAlloc(gpa, auth_path);
+    defer gpa.free(auth_data);
+    try std.testing.expect(std.mem.indexOf(u8, auth_data, "\"OPENAI_API_KEY\":\"sk-test\"") != null);
+}
+
+test "import cc-switch api profiles updates existing stable profile in place" {
+    const gpa = std.testing.allocator;
+    if (!sqlite3Available(gpa)) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("codex-home/accounts");
+    const codex_home = try tmp.dir.realpathAlloc(gpa, "codex-home");
+    defer gpa.free(codex_home);
+    const root = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(root);
+    const db_path = try std.fs.path.join(gpa, &[_][]const u8{ root, "cc-switch.db" });
+    defer gpa.free(db_path);
+
+    const create_sql =
+        \\CREATE TABLE providers (
+        \\  id TEXT NOT NULL,
+        \\  app_type TEXT NOT NULL,
+        \\  name TEXT NOT NULL,
+        \\  settings_config TEXT NOT NULL,
+        \\  website_url TEXT,
+        \\  category TEXT,
+        \\  created_at INTEGER,
+        \\  sort_index INTEGER,
+        \\  notes TEXT,
+        \\  icon TEXT,
+        \\  icon_color TEXT,
+        \\  meta TEXT NOT NULL DEFAULT '{}',
+        \\  is_current BOOLEAN NOT NULL DEFAULT 0,
+        \\  in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+        \\  cost_multiplier TEXT NOT NULL DEFAULT '1.0',
+        \\  limit_daily_usd TEXT,
+        \\  limit_monthly_usd TEXT,
+        \\  provider_type TEXT,
+        \\  PRIMARY KEY (id, app_type)
+        \\);
+        \\INSERT INTO providers (id, app_type, name, settings_config, created_at, sort_index, is_current) VALUES
+        \\('provider-cpa', 'codex', 'CPA', '{"auth":{"OPENAI_API_KEY":"sk-test"},"config":"model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n"}', 1, 1, 0);
+    ;
+    try runSqliteStatement(gpa, db_path, create_sql);
+
+    var reg = makeEmptyRegistry();
+    defer reg.deinit(gpa);
+
+    _ = try registry.importCcSwitchApiProfiles(gpa, codex_home, &reg, db_path, .all);
+    const update_sql =
+        \\UPDATE providers
+        \\SET name = 'CPA Updated',
+        \\    settings_config = '{"auth":{"OPENAI_API_KEY":"sk-test"},"config":"model_provider = \"custom\"\nmodel = \"gpt-5.5\"\n"}'
+        \\WHERE id = 'provider-cpa' AND app_type = 'codex';
+    ;
+    try runSqliteStatement(gpa, db_path, update_sql);
+
+    const summary = try registry.importCcSwitchApiProfiles(gpa, codex_home, &reg, db_path, .all);
+    try std.testing.expectEqual(@as(usize, 0), summary.imported);
+    try std.testing.expectEqual(@as(usize, 1), summary.updated);
+    try std.testing.expectEqual(@as(usize, 0), summary.skipped);
+    try std.testing.expectEqual(@as(usize, 1), reg.api_profiles.items.len);
+    try std.testing.expectEqualStrings("CPA Updated", reg.api_profiles.items[0].label);
+    try std.testing.expectEqualStrings("gpt-5.5", reg.api_profiles.items[0].model.?);
 }

@@ -11,7 +11,7 @@ pub const PlanType = enum { free, plus, prolite, pro, team, business, enterprise
 pub const AuthMode = enum { chatgpt, apikey };
 pub const RenewalSource = enum { manual, auto };
 pub const RenewalStatus = enum { ok, missing, unsupported, fetch_failed };
-pub const current_schema_version: u32 = 4;
+pub const current_schema_version: u32 = 5;
 pub const min_supported_schema_version: u32 = 2;
 pub const default_auto_switch_threshold_5h_percent: u8 = 10;
 pub const default_auto_switch_threshold_weekly_percent: u8 = 5;
@@ -75,6 +75,30 @@ pub const RenewalInfo = struct {
     status: RenewalStatus = .missing,
 };
 
+pub const ApiProfileRecord = struct {
+    profile_key: []u8,
+    label: []u8,
+    model_provider: ?[]u8 = null,
+    provider_name: ?[]u8 = null,
+    model: ?[]u8 = null,
+    base_url: ?[]u8 = null,
+    wire_api: ?[]u8 = null,
+    created_at: i64,
+    last_used_at: ?i64 = null,
+};
+
+pub const CcSwitchImportSelector = union(enum) {
+    current,
+    all,
+    provider_id: []const u8,
+};
+
+pub const CcSwitchImportSummary = struct {
+    imported: usize = 0,
+    updated: usize = 0,
+    skipped: usize = 0,
+};
+
 pub const AccountRecord = struct {
     account_key: []u8,
     chatgpt_account_id: []u8,
@@ -115,17 +139,25 @@ pub fn planLabel(plan: PlanType) []const u8 {
 pub const Registry = struct {
     schema_version: u32,
     active_account_key: ?[]u8,
+    active_api_profile_key: ?[]u8 = null,
+    active_auth_mode: ?AuthMode = null,
     active_account_activated_at_ms: ?i64,
     auto_switch: AutoSwitchConfig,
     api: ApiConfig,
     accounts: std.ArrayList(AccountRecord),
+    api_profiles: std.ArrayList(ApiProfileRecord) = std.ArrayList(ApiProfileRecord).empty,
 
     pub fn deinit(self: *Registry, allocator: std.mem.Allocator) void {
         for (self.accounts.items) |*rec| {
             freeAccountRecord(allocator, rec);
         }
         if (self.active_account_key) |k| allocator.free(k);
+        if (self.active_api_profile_key) |k| allocator.free(k);
         self.accounts.deinit(allocator);
+        for (self.api_profiles.items) |*profile| {
+            freeApiProfileRecord(allocator, profile);
+        }
+        self.api_profiles.deinit(allocator);
     }
 };
 
@@ -149,6 +181,16 @@ fn freeAccountRecord(allocator: std.mem.Allocator, rec: *const AccountRecord) vo
         freeRateLimitSnapshot(allocator, u);
     }
     freeRenewalInfo(allocator, &rec.renewal);
+}
+
+fn freeApiProfileRecord(allocator: std.mem.Allocator, rec: *const ApiProfileRecord) void {
+    allocator.free(rec.profile_key);
+    allocator.free(rec.label);
+    if (rec.model_provider) |value| allocator.free(value);
+    if (rec.provider_name) |value| allocator.free(value);
+    if (rec.model) |value| allocator.free(value);
+    if (rec.base_url) |value| allocator.free(value);
+    if (rec.wire_api) |value| allocator.free(value);
 }
 
 pub fn freeRateLimitSnapshot(allocator: std.mem.Allocator, snapshot: *const RateLimitSnapshot) void {
@@ -301,6 +343,32 @@ fn replaceOptionalStringAlloc(
     return true;
 }
 
+fn replaceRequiredStringAlloc(
+    allocator: std.mem.Allocator,
+    target: *[]u8,
+    value: []const u8,
+) !bool {
+    if (std.mem.eql(u8, target.*, value)) return false;
+    const replacement = try allocator.dupe(u8, value);
+    allocator.free(target.*);
+    target.* = replacement;
+    return true;
+}
+
+fn cloneApiProfileRecord(allocator: std.mem.Allocator, profile: ApiProfileRecord) !ApiProfileRecord {
+    return .{
+        .profile_key = try allocator.dupe(u8, profile.profile_key),
+        .label = try allocator.dupe(u8, profile.label),
+        .model_provider = try cloneOptionalStringAlloc(allocator, profile.model_provider),
+        .provider_name = try cloneOptionalStringAlloc(allocator, profile.provider_name),
+        .model = try cloneOptionalStringAlloc(allocator, profile.model),
+        .base_url = try cloneOptionalStringAlloc(allocator, profile.base_url),
+        .wire_api = try cloneOptionalStringAlloc(allocator, profile.wire_api),
+        .created_at = profile.created_at,
+        .last_used_at = profile.last_used_at,
+    };
+}
+
 fn getNonEmptyEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
     const val = io_util.getEnvVarOwned(allocator, name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
@@ -430,8 +498,44 @@ fn accountSnapshotFileName(allocator: std.mem.Allocator, account_key: []const u8
     return try std.mem.concat(allocator, u8, &[_][]const u8{ key, ".auth.json" });
 }
 
+fn accountConfigSnapshotFileName(allocator: std.mem.Allocator, account_key: []const u8) ![]u8 {
+    const key = try accountFileKey(allocator, account_key);
+    defer allocator.free(key);
+    return try std.mem.concat(allocator, u8, &[_][]const u8{ key, ".config.toml" });
+}
+
+fn apiProfileAuthSnapshotFileName(allocator: std.mem.Allocator, profile_key: []const u8) ![]u8 {
+    const key = try accountFileKey(allocator, profile_key);
+    defer allocator.free(key);
+    return try std.mem.concat(allocator, u8, &[_][]const u8{ "api-profile.", key, ".api-auth.json" });
+}
+
+fn apiProfileConfigSnapshotFileName(allocator: std.mem.Allocator, profile_key: []const u8) ![]u8 {
+    const key = try accountFileKey(allocator, profile_key);
+    defer allocator.free(key);
+    return try std.mem.concat(allocator, u8, &[_][]const u8{ "api-profile.", key, ".config.toml" });
+}
+
 pub fn accountAuthPath(allocator: std.mem.Allocator, codex_home: []const u8, account_key: []const u8) ![]u8 {
     const filename = try accountSnapshotFileName(allocator, account_key);
+    defer allocator.free(filename);
+    return try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "accounts", filename });
+}
+
+pub fn accountConfigPath(allocator: std.mem.Allocator, codex_home: []const u8, account_key: []const u8) ![]u8 {
+    const filename = try accountConfigSnapshotFileName(allocator, account_key);
+    defer allocator.free(filename);
+    return try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "accounts", filename });
+}
+
+pub fn apiProfileAuthPath(allocator: std.mem.Allocator, codex_home: []const u8, profile_key: []const u8) ![]u8 {
+    const filename = try apiProfileAuthSnapshotFileName(allocator, profile_key);
+    defer allocator.free(filename);
+    return try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "accounts", filename });
+}
+
+pub fn apiProfileConfigPath(allocator: std.mem.Allocator, codex_home: []const u8, profile_key: []const u8) ![]u8 {
+    const filename = try apiProfileConfigSnapshotFileName(allocator, profile_key);
     defer allocator.free(filename);
     return try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "accounts", filename });
 }
@@ -446,6 +550,10 @@ fn legacyAccountAuthPath(allocator: std.mem.Allocator, codex_home: []const u8, e
 
 pub fn activeAuthPath(allocator: std.mem.Allocator, codex_home: []const u8) ![]u8 {
     return try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "auth.json" });
+}
+
+pub fn activeConfigPath(allocator: std.mem.Allocator, codex_home: []const u8) ![]u8 {
+    return try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "config.toml" });
 }
 
 pub fn copyFile(src: []const u8, dest: []const u8) !void {
@@ -498,6 +606,410 @@ fn fileEqualsBytes(allocator: std.mem.Allocator, path: []const u8, bytes: []cons
     defer if (data) |buf| allocator.free(buf);
     if (data == null) return false;
     return std.mem.eql(u8, data.?, bytes);
+}
+
+fn deleteFileIfExists(path: []const u8) !void {
+    std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+fn syncSnapshotFileFromCurrent(
+    allocator: std.mem.Allocator,
+    current_path: []const u8,
+    snapshot_path: []const u8,
+) !bool {
+    const current_bytes = try readFileIfExists(allocator, current_path);
+    defer if (current_bytes) |bytes| allocator.free(bytes);
+
+    if (current_bytes) |bytes| {
+        if (try fileEqualsBytes(allocator, snapshot_path, bytes)) return false;
+        try writeFile(snapshot_path, bytes);
+        return true;
+    }
+
+    if (!(try fileExists(snapshot_path))) return false;
+    try deleteFileIfExists(snapshot_path);
+    return true;
+}
+
+fn restoreActiveFileFromSnapshot(
+    allocator: std.mem.Allocator,
+    snapshot_path: []const u8,
+    active_path: []const u8,
+) !bool {
+    if (try fileExists(snapshot_path)) {
+        if (try filesEqual(allocator, snapshot_path, active_path)) return false;
+        try copyFile(snapshot_path, active_path);
+        return true;
+    }
+
+    if (!(try fileExists(active_path))) return false;
+    try deleteFileIfExists(active_path);
+    return true;
+}
+
+const ActiveApiConfigSummary = struct {
+    model_provider: ?[]u8 = null,
+    provider_name: ?[]u8 = null,
+    model: ?[]u8 = null,
+    base_url: ?[]u8 = null,
+    wire_api: ?[]u8 = null,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.model_provider) |value| allocator.free(value);
+        if (self.provider_name) |value| allocator.free(value);
+        if (self.model) |value| allocator.free(value);
+        if (self.base_url) |value| allocator.free(value);
+        if (self.wire_api) |value| allocator.free(value);
+    }
+};
+
+fn parseTomlQuotedStringValue(line: []const u8, key: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (!std.mem.startsWith(u8, trimmed, key)) return null;
+    var rest = trimmed[key.len..];
+    rest = std.mem.trimLeft(u8, rest, " \t");
+    if (rest.len == 0 or rest[0] != '=') return null;
+    rest = std.mem.trimLeft(u8, rest[1..], " \t");
+    if (rest.len < 2 or rest[0] != '"') return null;
+
+    var idx: usize = 1;
+    while (idx < rest.len) : (idx += 1) {
+        if (rest[idx] == '"' and rest[idx - 1] != '\\') {
+            return rest[1..idx];
+        }
+    }
+
+    return null;
+}
+
+fn parseTomlSectionName(line: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len < 3) return null;
+    if (trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return null;
+    return trimmed[1 .. trimmed.len - 1];
+}
+
+fn parseActiveApiConfigSummary(allocator: std.mem.Allocator, data: []const u8) !ActiveApiConfigSummary {
+    var summary = ActiveApiConfigSummary{};
+    errdefer summary.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        if (summary.model_provider == null) {
+            if (parseTomlQuotedStringValue(line, "model_provider")) |value| {
+                summary.model_provider = try allocator.dupe(u8, value);
+            }
+        }
+        if (summary.model == null) {
+            if (parseTomlQuotedStringValue(line, "model")) |value| {
+                summary.model = try allocator.dupe(u8, value);
+            }
+        }
+    }
+
+    const model_provider = summary.model_provider orelse return summary;
+    const target_section = try std.fmt.allocPrint(allocator, "model_providers.{s}", .{model_provider});
+    defer allocator.free(target_section);
+
+    var in_target_section = false;
+    lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        if (parseTomlSectionName(line)) |section_name| {
+            in_target_section = std.mem.eql(u8, section_name, target_section);
+            continue;
+        }
+        if (!in_target_section) continue;
+
+        if (summary.provider_name == null) {
+            if (parseTomlQuotedStringValue(line, "name")) |value| {
+                summary.provider_name = try allocator.dupe(u8, value);
+                continue;
+            }
+        }
+        if (summary.base_url == null) {
+            if (parseTomlQuotedStringValue(line, "base_url")) |value| {
+                summary.base_url = try allocator.dupe(u8, value);
+                continue;
+            }
+        }
+        if (summary.wire_api == null) {
+            if (parseTomlQuotedStringValue(line, "wire_api")) |value| {
+                summary.wire_api = try allocator.dupe(u8, value);
+                continue;
+            }
+        }
+    }
+
+    return summary;
+}
+
+const cc_switch_sqlite_max_output_bytes = 16 * 1024 * 1024;
+
+const CcSwitchProviderRecord = struct {
+    id: []u8,
+    name: []u8,
+    is_current: bool,
+    settings_config: []u8,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.name);
+        allocator.free(self.settings_config);
+    }
+};
+
+fn appendSqlStringLiteral(sql: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    try sql.append(allocator, '\'');
+    for (value) |ch| {
+        if (ch == '\'') try sql.append(allocator, '\'');
+        try sql.append(allocator, ch);
+    }
+    try sql.append(allocator, '\'');
+}
+
+fn runSqliteCapture(
+    allocator: std.mem.Allocator,
+    db_path: []const u8,
+    sql: []const u8,
+) !std.process.Child.RunResult {
+    return std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ "sqlite3", "-batch", "-noheader", db_path, sql },
+        .max_output_bytes = cc_switch_sqlite_max_output_bytes,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.Sqlite3NotFound,
+        else => return err,
+    };
+}
+
+fn expectSqliteSuccess(result: std.process.Child.RunResult) !void {
+    switch (result.term) {
+        .Exited => |code| {
+            if (code == 0) return;
+        },
+        else => {},
+    }
+    return error.SqliteQueryFailed;
+}
+
+fn decodeHexNibble(ch: u8) !u8 {
+    return switch (ch) {
+        '0'...'9' => ch - '0',
+        'a'...'f' => ch - 'a' + 10,
+        'A'...'F' => ch - 'A' + 10,
+        else => error.InvalidHexString,
+    };
+}
+
+fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    if (text.len % 2 != 0) return error.InvalidHexString;
+    const out = try allocator.alloc(u8, text.len / 2);
+    errdefer allocator.free(out);
+    var i: usize = 0;
+    while (i < text.len) : (i += 2) {
+        const hi = try decodeHexNibble(text[i]);
+        const lo = try decodeHexNibble(text[i + 1]);
+        out[i / 2] = (hi << 4) | lo;
+    }
+    return out;
+}
+
+fn ccSwitchProfileKeyAlloc(allocator: std.mem.Allocator, provider_id: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "ccswitch-{s}", .{provider_id});
+}
+
+pub fn defaultCcSwitchDbPath(allocator: std.mem.Allocator) ![]u8 {
+    const home = try resolveUserHome(allocator);
+    defer allocator.free(home);
+    return try std.fs.path.join(allocator, &[_][]const u8{ home, ".cc-switch", "cc-switch.db" });
+}
+
+fn loadCcSwitchProviders(
+    allocator: std.mem.Allocator,
+    db_path: []const u8,
+    selector: CcSwitchImportSelector,
+) !std.ArrayList(CcSwitchProviderRecord) {
+    std.fs.cwd().access(db_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.CcSwitchDbNotFound,
+        else => return err,
+    };
+
+    var sql = std.ArrayList(u8).empty;
+    defer sql.deinit(allocator);
+    try sql.appendSlice(allocator, "SELECT hex(id), hex(name), coalesce(is_current, 0), hex(settings_config) FROM providers WHERE app_type = 'codex'");
+    switch (selector) {
+        .current => try sql.appendSlice(allocator, " AND is_current = 1"),
+        .all => {},
+        .provider_id => |provider_id| {
+            try sql.appendSlice(allocator, " AND id = ");
+            try appendSqlStringLiteral(&sql, allocator, provider_id);
+        },
+    }
+    try sql.appendSlice(allocator, " ORDER BY sort_index, created_at, id;");
+
+    const result = try runSqliteCapture(allocator, db_path, sql.items);
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectSqliteSuccess(result);
+
+    var providers = std.ArrayList(CcSwitchProviderRecord).empty;
+    errdefer {
+        for (providers.items) |*provider| provider.deinit(allocator);
+        providers.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0) continue;
+
+        var cols = std.mem.splitScalar(u8, line, '|');
+        const id_hex = cols.next() orelse return error.InvalidCcSwitchProviderRow;
+        const name_hex = cols.next() orelse return error.InvalidCcSwitchProviderRow;
+        const current_text = cols.next() orelse return error.InvalidCcSwitchProviderRow;
+        const settings_hex = cols.next() orelse return error.InvalidCcSwitchProviderRow;
+        if (cols.next() != null) return error.InvalidCcSwitchProviderRow;
+
+        try providers.append(allocator, .{
+            .id = try decodeHexAlloc(allocator, id_hex),
+            .name = try decodeHexAlloc(allocator, name_hex),
+            .is_current = std.mem.eql(u8, current_text, "1"),
+            .settings_config = try decodeHexAlloc(allocator, settings_hex),
+        });
+    }
+
+    if (selector == .provider_id and providers.items.len == 0) return error.CcSwitchProviderNotFound;
+    return providers;
+}
+
+fn serializeJsonValueAlloc(allocator: std.mem.Allocator, value: std.json.Value) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try std.json.Stringify.value(value, .{}, &out.writer);
+    return try out.toOwnedSlice();
+}
+
+fn writeOptionalSnapshotData(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    data: ?[]const u8,
+) !bool {
+    if (data) |bytes| {
+        if (try fileEqualsBytes(allocator, path, bytes)) return false;
+        try writeFile(path, bytes);
+        return true;
+    }
+
+    if (!(try fileExists(path))) return false;
+    try deleteFileIfExists(path);
+    return true;
+}
+
+fn importCcSwitchProviderRecord(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *Registry,
+    provider: *const CcSwitchProviderRecord,
+) !bool {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, provider.settings_config, .{});
+    defer parsed.deinit();
+
+    const root_obj = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.InvalidCcSwitchSettingsConfig,
+    };
+    const auth_value = root_obj.get("auth") orelse return false;
+
+    const auth_bytes = try serializeJsonValueAlloc(allocator, auth_value);
+    defer allocator.free(auth_bytes);
+
+    const auth_info = try @import("auth.zig").parseAuthInfoData(allocator, auth_bytes);
+    defer auth_info.deinit(allocator);
+    if (auth_info.auth_mode != .apikey) return false;
+
+    const config_bytes = if (root_obj.get("config")) |config_value| switch (config_value) {
+        .string => |text| if (text.len == 0) null else try allocator.dupe(u8, text),
+        .null => null,
+        else => return error.InvalidCcSwitchSettingsConfig,
+    } else null;
+    defer if (config_bytes) |bytes| allocator.free(bytes);
+
+    var summary = if (config_bytes) |bytes|
+        try parseActiveApiConfigSummary(allocator, bytes)
+    else
+        ActiveApiConfigSummary{};
+    defer summary.deinit(allocator);
+
+    const profile_key = try ccSwitchProfileKeyAlloc(allocator, provider.id);
+    defer allocator.free(profile_key);
+
+    const auth_path = try apiProfileAuthPath(allocator, codex_home, profile_key);
+    defer allocator.free(auth_path);
+    const config_path = try apiProfileConfigPath(allocator, codex_home, profile_key);
+    defer allocator.free(config_path);
+
+    var changed = false;
+    changed = (try writeOptionalSnapshotData(allocator, auth_path, auth_bytes)) or changed;
+    changed = (try writeOptionalSnapshotData(allocator, config_path, config_bytes)) or changed;
+
+    if (findApiProfileIndexByKey(reg, profile_key)) |idx| {
+        var rec = &reg.api_profiles.items[idx];
+        changed = (try replaceRequiredStringAlloc(allocator, &rec.label, provider.name)) or changed;
+        changed = (try updateApiProfileMetadata(allocator, rec, null, &summary)) or changed;
+        return changed;
+    }
+
+    try reg.api_profiles.append(allocator, .{
+        .profile_key = try allocator.dupe(u8, profile_key),
+        .label = try allocator.dupe(u8, provider.name),
+        .model_provider = try cloneOptionalStringAlloc(allocator, summary.model_provider),
+        .provider_name = try cloneOptionalStringAlloc(allocator, summary.provider_name),
+        .model = try cloneOptionalStringAlloc(allocator, summary.model),
+        .base_url = try cloneOptionalStringAlloc(allocator, summary.base_url),
+        .wire_api = try cloneOptionalStringAlloc(allocator, summary.wire_api),
+        .created_at = std.time.timestamp(),
+        .last_used_at = null,
+    });
+    return true;
+}
+
+pub fn importCcSwitchApiProfiles(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *Registry,
+    db_path: []const u8,
+    selector: CcSwitchImportSelector,
+) !CcSwitchImportSummary {
+    try ensureAccountsDir(allocator, codex_home);
+
+    var providers = try loadCcSwitchProviders(allocator, db_path, selector);
+    defer {
+        for (providers.items) |*provider| provider.deinit(allocator);
+        providers.deinit(allocator);
+    }
+
+    var summary: CcSwitchImportSummary = .{};
+    for (providers.items) |*provider| {
+        const profile_key = try ccSwitchProfileKeyAlloc(allocator, provider.id);
+        const existed = findApiProfileIndexByKey(reg, profile_key) != null;
+        allocator.free(profile_key);
+
+        const changed = try importCcSwitchProviderRecord(allocator, codex_home, reg, provider);
+        if (!changed) {
+            summary.skipped += 1;
+            continue;
+        }
+        if (existed) {
+            summary.updated += 1;
+        } else {
+            summary.imported += 1;
+        }
+    }
+
+    return summary;
 }
 
 fn ensureDir(path: []const u8) !void {
@@ -650,9 +1162,29 @@ fn resolveStrictAccountAuthPath(
 
 fn isAllowedCurrentSnapshot(reg: *const Registry, entry_name: []const u8) bool {
     for (reg.accounts.items) |rec| {
-        const expected_name = accountSnapshotFileName(std.heap.page_allocator, rec.account_key) catch continue;
-        defer std.heap.page_allocator.free(expected_name);
-        if (std.mem.eql(u8, entry_name, expected_name)) {
+        const auth_name = accountSnapshotFileName(std.heap.page_allocator, rec.account_key) catch continue;
+        defer std.heap.page_allocator.free(auth_name);
+        if (std.mem.eql(u8, entry_name, auth_name)) {
+            return true;
+        }
+
+        const config_name = accountConfigSnapshotFileName(std.heap.page_allocator, rec.account_key) catch continue;
+        defer std.heap.page_allocator.free(config_name);
+        if (std.mem.eql(u8, entry_name, config_name)) {
+            return true;
+        }
+    }
+
+    for (reg.api_profiles.items) |profile| {
+        const auth_name = apiProfileAuthSnapshotFileName(std.heap.page_allocator, profile.profile_key) catch continue;
+        defer std.heap.page_allocator.free(auth_name);
+        if (std.mem.eql(u8, entry_name, auth_name)) {
+            return true;
+        }
+
+        const config_name = apiProfileConfigSnapshotFileName(std.heap.page_allocator, profile.profile_key) catch continue;
+        defer std.heap.page_allocator.free(config_name);
+        if (std.mem.eql(u8, entry_name, config_name)) {
             return true;
         }
     }
@@ -1561,6 +2093,7 @@ fn syncCurrentAuthBestEffort(
 
     const info = @import("auth.zig").parseAuthInfo(allocator, auth_path) catch return null;
     defer info.deinit(allocator);
+    if (info.auth_mode == .apikey) return null;
     _ = info.email orelse return null;
     const record_key = info.record_key orelse return null;
 
@@ -1599,6 +2132,7 @@ fn syncCurrentAuthBestEffort(
         try upsertAccount(allocator, reg, record);
     }
 
+    _ = try syncActiveConfigSnapshotForAccount(allocator, codex_home, record_key);
     try setActiveAccountKey(allocator, reg, record_key);
     return if (existing_idx != null) .updated else .imported;
 }
@@ -1610,15 +2144,39 @@ pub fn findAccountIndexByAccountKey(reg: *Registry, account_key: []const u8) ?us
     return null;
 }
 
+pub fn findApiProfileIndexByKey(reg: *Registry, profile_key: []const u8) ?usize {
+    for (reg.api_profiles.items, 0..) |profile, i| {
+        if (std.mem.eql(u8, profile.profile_key, profile_key)) return i;
+    }
+    return null;
+}
+
+fn apiProfileByKey(reg: *Registry, profile_key: []const u8) !*ApiProfileRecord {
+    const idx = findApiProfileIndexByKey(reg, profile_key) orelse return error.ApiProfileNotFound;
+    return &reg.api_profiles.items[idx];
+}
+
+fn clearActiveAccountKey(allocator: std.mem.Allocator, reg: *Registry) void {
+    if (reg.active_account_key) |key| allocator.free(key);
+    reg.active_account_key = null;
+}
+
+fn clearActiveApiProfileKey(allocator: std.mem.Allocator, reg: *Registry) void {
+    if (reg.active_api_profile_key) |key| allocator.free(key);
+    reg.active_api_profile_key = null;
+}
+
 pub fn setActiveAccountKey(allocator: std.mem.Allocator, reg: *Registry, account_key: []const u8) !void {
     if (reg.active_account_key) |k| {
-        if (std.mem.eql(u8, k, account_key)) return;
+        if (std.mem.eql(u8, k, account_key) and reg.active_auth_mode == .chatgpt and reg.active_api_profile_key == null) {
+            return;
+        }
     }
     const new_active_account_key = try allocator.dupe(u8, account_key);
-    if (reg.active_account_key) |k| {
-        allocator.free(k);
-    }
+    clearActiveAccountKey(allocator, reg);
+    clearActiveApiProfileKey(allocator, reg);
     reg.active_account_key = new_active_account_key;
+    reg.active_auth_mode = .chatgpt;
     reg.active_account_activated_at_ms = std.time.milliTimestamp();
     const now = std.time.timestamp();
     for (reg.accounts.items) |*rec| {
@@ -1627,6 +2185,50 @@ pub fn setActiveAccountKey(allocator: std.mem.Allocator, reg: *Registry, account
             break;
         }
     }
+}
+
+pub fn setActiveApiProfileKey(allocator: std.mem.Allocator, reg: *Registry, profile_key: []const u8) !void {
+    const idx = findApiProfileIndexByKey(reg, profile_key) orelse return error.ApiProfileNotFound;
+    const new_active_profile_key = try allocator.dupe(u8, profile_key);
+    clearActiveAccountKey(allocator, reg);
+    clearActiveApiProfileKey(allocator, reg);
+    reg.active_api_profile_key = new_active_profile_key;
+    reg.active_auth_mode = .apikey;
+    reg.active_account_activated_at_ms = std.time.milliTimestamp();
+    reg.api_profiles.items[idx].last_used_at = std.time.timestamp();
+}
+
+fn setUntrackedApiMode(allocator: std.mem.Allocator, reg: *Registry) void {
+    clearActiveAccountKey(allocator, reg);
+    clearActiveApiProfileKey(allocator, reg);
+    reg.active_auth_mode = .apikey;
+    reg.active_account_activated_at_ms = std.time.milliTimestamp();
+}
+
+fn updateApiProfileMetadata(
+    allocator: std.mem.Allocator,
+    profile: *ApiProfileRecord,
+    label: ?[]const u8,
+    summary: *const ActiveApiConfigSummary,
+) !bool {
+    var changed = false;
+    if (label) |value| {
+        changed = (try replaceRequiredStringAlloc(allocator, &profile.label, value)) or changed;
+    }
+    changed = (try replaceOptionalStringAlloc(allocator, &profile.model_provider, summary.model_provider)) or changed;
+    changed = (try replaceOptionalStringAlloc(allocator, &profile.provider_name, summary.provider_name)) or changed;
+    changed = (try replaceOptionalStringAlloc(allocator, &profile.model, summary.model)) or changed;
+    changed = (try replaceOptionalStringAlloc(allocator, &profile.base_url, summary.base_url)) or changed;
+    changed = (try replaceOptionalStringAlloc(allocator, &profile.wire_api, summary.wire_api)) or changed;
+    return changed;
+}
+
+fn generateApiProfileKey(allocator: std.mem.Allocator, label: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "api-{d}-{x}",
+        .{ std.time.milliTimestamp(), std.hash.Wyhash.hash(0, label) },
+    );
 }
 
 pub fn updateUsage(allocator: std.mem.Allocator, reg: *Registry, account_key: []const u8, snapshot: RateLimitSnapshot) void {
@@ -1702,12 +2304,6 @@ pub fn markAccountRenewalStatus(
 }
 
 pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []const u8, reg: *Registry) !bool {
-    if (reg.accounts.items.len == 0) {
-        const changed = try autoImportActiveAuth(allocator, codex_home, reg);
-        tryEnsureDualProviderHistory(allocator, codex_home);
-        return changed;
-    }
-
     const auth_path = try activeAuthPath(allocator, codex_home);
     defer allocator.free(auth_path);
 
@@ -1728,6 +2324,37 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
         },
     };
     defer info.deinit(allocator);
+
+    if (info.auth_mode == .apikey) {
+        const config_path = try activeConfigPath(allocator, codex_home);
+        defer allocator.free(config_path);
+        const config_bytes = try readFileIfExists(allocator, config_path);
+        defer if (config_bytes) |bytes| allocator.free(bytes);
+
+        if (try findMatchingApiProfileIndexForCurrentFiles(
+            allocator,
+            codex_home,
+            reg,
+            auth_bytes,
+            config_bytes,
+        )) |idx| {
+            const profile_key = reg.api_profiles.items[idx].profile_key;
+            const changed = reg.active_auth_mode != .apikey or
+                reg.active_account_key != null or
+                reg.active_api_profile_key == null or
+                !std.mem.eql(u8, reg.active_api_profile_key.?, profile_key);
+            try setActiveApiProfileKey(allocator, reg, profile_key);
+            tryEnsureDualProviderHistory(allocator, codex_home);
+            return changed;
+        }
+
+        const changed = reg.active_auth_mode != .apikey or
+            reg.active_account_key != null or
+            reg.active_api_profile_key != null;
+        setUntrackedApiMode(allocator, reg);
+        tryEnsureDualProviderHistory(allocator, codex_home);
+        return changed;
+    }
 
     const email = info.email orelse {
         std.log.warn("auth.json missing email; skipping sync", .{});
@@ -1753,6 +2380,9 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
         errdefer if (record_owned) freeAccountRecord(allocator, &record);
         try upsertAccount(allocator, reg, record);
         record_owned = false;
+        if (try syncActiveConfigSnapshotForAccount(allocator, codex_home, record_key)) {
+            // Config snapshot changed with the new record.
+        }
         try setActiveAccountKey(allocator, reg, record_key);
         tryEnsureDualProviderHistory(allocator, codex_home);
         return true;
@@ -1786,6 +2416,9 @@ pub fn syncActiveAccountFromAuth(allocator: std.mem.Allocator, codex_home: []con
     defer allocator.free(dest);
     if (!(try fileEqualsBytes(allocator, dest, auth_bytes))) {
         try copyFile(auth_path, dest);
+        changed = true;
+    }
+    if (try syncActiveConfigSnapshotForAccount(allocator, codex_home, rec_account_key)) {
         changed = true;
     }
 
@@ -1827,6 +2460,9 @@ pub fn removeAccounts(allocator: std.mem.Allocator, codex_home: []const u8, reg:
             const preferred_path = try accountAuthPath(allocator, codex_home, rec.account_key);
             defer allocator.free(preferred_path);
             std.fs.cwd().deleteFile(preferred_path) catch {};
+            const config_path = try accountConfigPath(allocator, codex_home, rec.account_key);
+            defer allocator.free(config_path);
+            std.fs.cwd().deleteFile(config_path) catch {};
             freeAccountRecord(allocator, rec);
             continue;
         }
@@ -2010,6 +2646,116 @@ pub fn applyAccountNamesForUser(
     return changed;
 }
 
+fn syncActiveConfigSnapshotForAccount(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    account_key: []const u8,
+) !bool {
+    try ensureAccountsDir(allocator, codex_home);
+    const current_config_path = try activeConfigPath(allocator, codex_home);
+    defer allocator.free(current_config_path);
+    const snapshot_path = try accountConfigPath(allocator, codex_home, account_key);
+    defer allocator.free(snapshot_path);
+    return syncSnapshotFileFromCurrent(allocator, current_config_path, snapshot_path);
+}
+
+fn restoreAccountConfigSnapshotToActive(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    account_key: []const u8,
+    delete_when_missing: bool,
+) !bool {
+    const snapshot_path = try accountConfigPath(allocator, codex_home, account_key);
+    defer allocator.free(snapshot_path);
+    if (!delete_when_missing and !(try fileExists(snapshot_path))) return false;
+    const current_config_path = try activeConfigPath(allocator, codex_home);
+    defer allocator.free(current_config_path);
+    return restoreActiveFileFromSnapshot(allocator, snapshot_path, current_config_path);
+}
+
+fn findMatchingApiProfileIndexForCurrentFiles(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *Registry,
+    auth_bytes: []const u8,
+    config_bytes: ?[]const u8,
+) !?usize {
+    for (reg.api_profiles.items, 0..) |profile, idx| {
+        const auth_path = try apiProfileAuthPath(allocator, codex_home, profile.profile_key);
+        defer allocator.free(auth_path);
+        if (!(try fileEqualsBytes(allocator, auth_path, auth_bytes))) continue;
+
+        const config_path = try apiProfileConfigPath(allocator, codex_home, profile.profile_key);
+        defer allocator.free(config_path);
+        if (config_bytes) |bytes| {
+            if (!(try fileEqualsBytes(allocator, config_path, bytes))) continue;
+        } else if (try fileExists(config_path)) {
+            continue;
+        }
+
+        return idx;
+    }
+    return null;
+}
+
+pub fn captureCurrentApiProfile(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *Registry,
+    label: []const u8,
+) ![]u8 {
+    const auth_path = try activeAuthPath(allocator, codex_home);
+    defer allocator.free(auth_path);
+    const config_path = try activeConfigPath(allocator, codex_home);
+    defer allocator.free(config_path);
+
+    const auth_bytes = try readFileIfExists(allocator, auth_path) orelse return error.AuthFileNotFound;
+    defer allocator.free(auth_bytes);
+    const config_bytes = try readFileIfExists(allocator, config_path) orelse return error.ConfigFileNotFound;
+    defer allocator.free(config_bytes);
+
+    const info = try @import("auth.zig").parseAuthInfo(allocator, auth_path);
+    defer info.deinit(allocator);
+    if (info.auth_mode != .apikey) return error.ApiKeyModeRequired;
+
+    var summary = try parseActiveApiConfigSummary(allocator, config_bytes);
+    defer summary.deinit(allocator);
+
+    try ensureAccountsDir(allocator, codex_home);
+
+    if (try findMatchingApiProfileIndexForCurrentFiles(allocator, codex_home, reg, auth_bytes, config_bytes)) |idx| {
+        const profile = &reg.api_profiles.items[idx];
+        _ = try updateApiProfileMetadata(allocator, profile, label, &summary);
+        try setActiveApiProfileKey(allocator, reg, profile.profile_key);
+        return try allocator.dupe(u8, profile.profile_key);
+    }
+
+    const profile_key = try generateApiProfileKey(allocator, label);
+    errdefer allocator.free(profile_key);
+    const auth_dest = try apiProfileAuthPath(allocator, codex_home, profile_key);
+    defer allocator.free(auth_dest);
+    const config_dest = try apiProfileConfigPath(allocator, codex_home, profile_key);
+    defer allocator.free(config_dest);
+
+    try writeFile(auth_dest, auth_bytes);
+    try writeFile(config_dest, config_bytes);
+
+    const profile = ApiProfileRecord{
+        .profile_key = try allocator.dupe(u8, profile_key),
+        .label = try allocator.dupe(u8, label),
+        .model_provider = try cloneOptionalStringAlloc(allocator, summary.model_provider),
+        .provider_name = try cloneOptionalStringAlloc(allocator, summary.provider_name),
+        .model = try cloneOptionalStringAlloc(allocator, summary.model),
+        .base_url = try cloneOptionalStringAlloc(allocator, summary.base_url),
+        .wire_api = try cloneOptionalStringAlloc(allocator, summary.wire_api),
+        .created_at = std.time.timestamp(),
+        .last_used_at = std.time.timestamp(),
+    };
+    try reg.api_profiles.append(allocator, profile);
+    try setActiveApiProfileKey(allocator, reg, profile_key);
+    return profile_key;
+}
+
 pub fn activateAccountByKey(
     allocator: std.mem.Allocator,
     codex_home: []const u8,
@@ -2017,6 +2763,14 @@ pub fn activateAccountByKey(
     account_key: []const u8,
 ) !void {
     _ = findAccountIndexByAccountKey(reg, account_key) orelse return error.AccountNotFound;
+    const previous_mode = reg.active_auth_mode;
+    if (previous_mode == .chatgpt) {
+        if (reg.active_account_key) |current_key| {
+            if (!std.mem.eql(u8, current_key, account_key)) {
+                _ = try syncActiveConfigSnapshotForAccount(allocator, codex_home, current_key);
+            }
+        }
+    }
     const src = try resolveStrictAccountAuthPath(allocator, codex_home, account_key);
     defer allocator.free(src);
 
@@ -2025,7 +2779,37 @@ pub fn activateAccountByKey(
 
     try backupAuthIfChanged(allocator, codex_home, dest, src);
     try copyFile(src, dest);
+    _ = try restoreAccountConfigSnapshotToActive(allocator, codex_home, account_key, previous_mode == .apikey);
     try setActiveAccountKey(allocator, reg, account_key);
+    tryEnsureDualProviderHistory(allocator, codex_home);
+}
+
+pub fn activateApiProfileByKey(
+    allocator: std.mem.Allocator,
+    codex_home: []const u8,
+    reg: *Registry,
+    profile_key: []const u8,
+) !void {
+    _ = findApiProfileIndexByKey(reg, profile_key) orelse return error.ApiProfileNotFound;
+    if (reg.active_auth_mode == .chatgpt) {
+        if (reg.active_account_key) |current_key| {
+            _ = try syncActiveConfigSnapshotForAccount(allocator, codex_home, current_key);
+        }
+    }
+
+    const src_auth = try apiProfileAuthPath(allocator, codex_home, profile_key);
+    defer allocator.free(src_auth);
+    const src_config = try apiProfileConfigPath(allocator, codex_home, profile_key);
+    defer allocator.free(src_config);
+    const dest_auth = try activeAuthPath(allocator, codex_home);
+    defer allocator.free(dest_auth);
+    const dest_config = try activeConfigPath(allocator, codex_home);
+    defer allocator.free(dest_config);
+
+    try backupAuthIfChanged(allocator, codex_home, dest_auth, src_auth);
+    try copyFile(src_auth, dest_auth);
+    _ = try restoreActiveFileFromSnapshot(allocator, src_config, dest_config);
+    try setActiveApiProfileKey(allocator, reg, profile_key);
     tryEnsureDualProviderHistory(allocator, codex_home);
 }
 
@@ -2043,14 +2827,33 @@ pub fn replaceActiveAuthWithAccountByKey(
     defer allocator.free(dest);
 
     try copyFile(src, dest);
+    _ = try restoreAccountConfigSnapshotToActive(allocator, codex_home, account_key, true);
     try setActiveAccountKey(allocator, reg, account_key);
     tryEnsureDualProviderHistory(allocator, codex_home);
 }
 
 fn tryEnsureDualProviderHistory(allocator: std.mem.Allocator, codex_home: []const u8) void {
+    if (shouldSkipHistorySync(allocator)) return;
+
     _ = history_sync.ensureDualProviderHistory(allocator, codex_home) catch |err| {
         std.log.warn("history sync skipped: {s}", .{@errorName(err)});
     };
+}
+
+fn shouldSkipHistorySync(allocator: std.mem.Allocator) bool {
+    const value = std.process.getEnvVarOwned(allocator, "CODEX_AUTH_SKIP_HISTORY_SYNC") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return false,
+        else => {
+            std.log.warn("history sync skip flag ignored: {s}", .{@errorName(err)});
+            return false;
+        },
+    };
+    defer allocator.free(value);
+
+    return std.mem.eql(u8, value, "1") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "yes") or
+        std.ascii.eqlIgnoreCase(value, "on");
 }
 
 pub fn accountFromAuth(
@@ -2160,10 +2963,13 @@ fn defaultRegistry() Registry {
     return Registry{
         .schema_version = current_schema_version,
         .active_account_key = null,
+        .active_api_profile_key = null,
+        .active_auth_mode = null,
         .active_account_activated_at_ms = null,
         .auto_switch = defaultAutoSwitchConfig(),
         .api = defaultApiConfig(),
         .accounts = std.ArrayList(AccountRecord).empty,
+        .api_profiles = std.ArrayList(ApiProfileRecord).empty,
     };
 }
 
@@ -2270,6 +3076,31 @@ fn parseAccountRecord(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Ac
         rec.renewal = parseRenewalInfo(allocator, v);
     }
     return rec;
+}
+
+fn parseApiProfileRecord(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !ApiProfileRecord {
+    const profile_key_val = obj.get("profile_key") orelse return error.MissingApiProfileKey;
+    const label_val = obj.get("label") orelse return error.MissingApiProfileLabel;
+    const profile_key = switch (profile_key_val) {
+        .string => |s| s,
+        else => return error.MissingApiProfileKey,
+    };
+    const label = switch (label_val) {
+        .string => |s| s,
+        else => return error.MissingApiProfileLabel,
+    };
+
+    return .{
+        .profile_key = try allocator.dupe(u8, profile_key),
+        .label = try allocator.dupe(u8, label),
+        .model_provider = try parseOptionalStoredStringAlloc(allocator, obj.get("model_provider")),
+        .provider_name = try parseOptionalStoredStringAlloc(allocator, obj.get("provider_name")),
+        .model = try parseOptionalStoredStringAlloc(allocator, obj.get("model")),
+        .base_url = try parseOptionalStoredStringAlloc(allocator, obj.get("base_url")),
+        .wire_api = try parseOptionalStoredStringAlloc(allocator, obj.get("wire_api")),
+        .created_at = readInt(obj.get("created_at")) orelse std.time.timestamp(),
+        .last_used_at = readInt(obj.get("last_used_at")),
+    };
 }
 
 fn parseOptionalStoredStringAlloc(allocator: std.mem.Allocator, value: ?std.json.Value) !?[]u8 {
@@ -2468,6 +3299,10 @@ fn loadLegacyRegistryV2(
         try migrateLegacyRecord(allocator, codex_home, &reg, legacy_active_email, legacy);
     }
 
+    if (reg.active_account_key != null) {
+        reg.active_auth_mode = .chatgpt;
+    }
+
     return reg;
 }
 
@@ -2483,9 +3318,21 @@ fn loadCurrentRegistry(allocator: std.mem.Allocator, root_obj: std.json.ObjectMa
             else => {},
         }
     }
+    if (root_obj.get("active_api_profile_key")) |v| {
+        switch (v) {
+            .string => |s| reg.active_api_profile_key = try allocator.dupe(u8, s),
+            else => {},
+        }
+    }
+    if (root_obj.get("active_auth_mode")) |v| {
+        switch (v) {
+            .string => |s| reg.active_auth_mode = parseAuthMode(s),
+            else => {},
+        }
+    }
     if (root_obj.get("active_account_activated_at_ms")) |v| {
         reg.active_account_activated_at_ms = readInt(v);
-    } else if (reg.active_account_key != null) {
+    } else if (reg.active_account_key != null or reg.active_api_profile_key != null) {
         reg.active_account_activated_at_ms = 0;
     }
     if (root_obj.get("accounts")) |v| {
@@ -2503,12 +3350,34 @@ fn loadCurrentRegistry(allocator: std.mem.Allocator, root_obj: std.json.ObjectMa
             else => {},
         }
     }
+    if (root_obj.get("api_profiles")) |v| {
+        switch (v) {
+            .array => |arr| {
+                for (arr.items) |item| {
+                    const obj = switch (item) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    try reg.api_profiles.append(allocator, try parseApiProfileRecord(allocator, obj));
+                }
+            },
+            else => {},
+        }
+    }
 
     if (root_obj.get("auto_switch")) |v| {
         parseAutoSwitch(allocator, &reg.auto_switch, v);
     }
     if (root_obj.get("api")) |v| {
         parseApiConfig(&reg.api, v);
+    }
+
+    if (reg.active_auth_mode == null) {
+        if (reg.active_api_profile_key != null) {
+            reg.active_auth_mode = .apikey;
+        } else if (reg.active_account_key != null) {
+            reg.active_auth_mode = .chatgpt;
+        }
     }
 
     return reg;
@@ -2551,7 +3420,14 @@ fn currentLayoutNeedsRewrite(root_obj: std.json.ObjectMap) bool {
             else => {},
         }
     }
-    return root_obj.get("active_account_key") != null and root_obj.get("active_account_activated_at_ms") == null;
+    if (root_obj.get("api_profiles") == null) return true;
+    if (root_obj.get("active_auth_mode") == null and
+        (root_obj.get("active_account_key") != null or root_obj.get("active_api_profile_key") != null))
+    {
+        return true;
+    }
+    return (root_obj.get("active_account_key") != null or root_obj.get("active_api_profile_key") != null) and
+        root_obj.get("active_account_activated_at_ms") == null;
 }
 
 fn detectSchemaVersion(root_obj: std.json.ObjectMap) u32 {
@@ -2606,6 +3482,7 @@ pub fn loadRegistry(allocator: std.mem.Allocator, codex_home: []const u8) !Regis
         2 => try loadLegacyRegistryV2(allocator, codex_home, root_obj),
         3 => try loadCurrentRegistry(allocator, root_obj),
         4 => try loadCurrentRegistry(allocator, root_obj),
+        5 => try loadCurrentRegistry(allocator, root_obj),
         else => {
             std.log.err(
                 "registry schema_version {d} is older than the minimum supported {d}; use an intermediate codex-auth release or import --purge",
@@ -2621,6 +3498,14 @@ pub fn loadRegistry(allocator: std.mem.Allocator, codex_home: []const u8) !Regis
         for (reg.accounts.items) |*rec| {
             normalizeRenewalInfo(&rec.renewal);
         }
+        if (reg.active_api_profile_key) |key| allocator.free(key);
+        reg.active_api_profile_key = null;
+        reg.active_auth_mode = if (reg.active_account_key != null) .chatgpt else null;
+        for (reg.api_profiles.items) |*profile| {
+            freeApiProfileRecord(allocator, profile);
+        }
+        reg.api_profiles.deinit(allocator);
+        reg.api_profiles = std.ArrayList(ApiProfileRecord).empty;
     }
 
     if (needs_rewrite) {
@@ -2686,10 +3571,13 @@ pub fn saveRegistry(allocator: std.mem.Allocator, codex_home: []const u8, reg: *
     const out = RegistryOut{
         .schema_version = current_schema_version,
         .active_account_key = reg.active_account_key,
+        .active_api_profile_key = reg.active_api_profile_key,
+        .active_auth_mode = reg.active_auth_mode,
         .active_account_activated_at_ms = reg.active_account_activated_at_ms,
         .auto_switch = reg.auto_switch,
         .api = reg.api,
         .accounts = reg.accounts.items,
+        .api_profiles = reg.api_profiles.items,
     };
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -2708,10 +3596,13 @@ pub fn saveRegistry(allocator: std.mem.Allocator, codex_home: []const u8, reg: *
 const RegistryOut = struct {
     schema_version: u32,
     active_account_key: ?[]const u8,
+    active_api_profile_key: ?[]const u8,
+    active_auth_mode: ?AuthMode,
     active_account_activated_at_ms: ?i64,
     auto_switch: AutoSwitchConfig,
     api: ApiConfig,
     accounts: []const AccountRecord,
+    api_profiles: []const ApiProfileRecord,
 };
 
 const RenewalDate = struct {
@@ -3079,6 +3970,9 @@ pub fn autoImportActiveAuth(allocator: std.mem.Allocator, codex_home: []const u8
 
     const info = try @import("auth.zig").parseAuthInfo(allocator, auth_path);
     defer info.deinit(allocator);
+    if (info.auth_mode == .apikey) {
+        return false;
+    }
     _ = info.email orelse {
         std.log.warn("auth.json missing email; cannot import", .{});
         return false;
@@ -3093,6 +3987,7 @@ pub fn autoImportActiveAuth(allocator: std.mem.Allocator, codex_home: []const u8
 
     const record = try accountFromAuth(allocator, "", &info);
     try upsertAccount(allocator, reg, record);
+    _ = try syncActiveConfigSnapshotForAccount(allocator, codex_home, record_key);
     try setActiveAccountKey(allocator, reg, record_key);
     return true;
 }

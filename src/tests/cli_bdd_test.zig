@@ -900,6 +900,79 @@ test "Scenario: Given switch with unexpected flag when parsing then usage error 
     try expectUsageError(result, .switch_account, "unknown flag");
 }
 
+test "Scenario: Given api-profile import-cc-switch all json when parsing then import options are preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{ "codex-auth", "api-profile", "import-cc-switch", "--all", "--json" };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .api_profile => |opts| switch (opts) {
+                .import_cc_switch => |import_opts| {
+                    try std.testing.expect(import_opts.all);
+                    try std.testing.expect(!import_opts.current);
+                    try std.testing.expect(import_opts.provider_id == null);
+                    try std.testing.expect(import_opts.db_path == null);
+                    try std.testing.expect(import_opts.json);
+                },
+                else => return error.TestExpectedEqual,
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given api-profile import-cc-switch provider id and db path when parsing then selector options are preserved" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{
+        "codex-auth",
+        "api-profile",
+        "import-cc-switch",
+        "--provider-id",
+        "provider-cpa",
+        "--db-path",
+        "/tmp/cc-switch.db",
+    };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    switch (result) {
+        .command => |cmd| switch (cmd) {
+            .api_profile => |opts| switch (opts) {
+                .import_cc_switch => |import_opts| {
+                    try std.testing.expect(!import_opts.all);
+                    try std.testing.expect(!import_opts.current);
+                    try std.testing.expect(import_opts.provider_id != null);
+                    try std.testing.expectEqualStrings("provider-cpa", import_opts.provider_id.?);
+                    try std.testing.expect(import_opts.db_path != null);
+                    try std.testing.expectEqualStrings("/tmp/cc-switch.db", import_opts.db_path.?);
+                    try std.testing.expect(!import_opts.json);
+                },
+                else => return error.TestExpectedEqual,
+            },
+            else => return error.TestExpectedEqual,
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Scenario: Given api-profile import-cc-switch conflicting selectors when parsing then usage error is returned" {
+    const gpa = std.testing.allocator;
+    const args = [_][:0]const u8{
+        "codex-auth",
+        "api-profile",
+        "import-cc-switch",
+        "--current",
+        "--all",
+    };
+    var result = try cli.parseArgs(gpa, &args);
+    defer cli.freeParseResult(gpa, &result);
+
+    try expectUsageError(result, .api_profile, "accepts only one selector");
+}
+
 test "Scenario: Given remove with positional query when parsing then query mode is preserved" {
     const gpa = std.testing.allocator;
     const args = [_][:0]const u8{ "codex-auth", "remove", "user@example.com" };

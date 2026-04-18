@@ -142,7 +142,9 @@ final class LocalWebServer {
                 send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("GET", "/api/preferences"):
                 let body = try jsonData(PreferencesResponse(
-                    restartCodexAfterSwitch: CodexMenuPreferences.restartCodexAfterSwitch(userDefaults: userDefaults)
+                    restartCodexAfterSwitch: CodexMenuPreferences.restartCodexAfterSwitch(userDefaults: userDefaults),
+                    restartCodexAfterSync: CodexMenuPreferences.restartCodexAfterSync(userDefaults: userDefaults),
+                    syncHistoryDuringSwitch: CodexMenuPreferences.syncHistoryDuringSwitch(userDefaults: userDefaults)
                 ))
                 send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("GET", "/api/api-config"):
@@ -165,14 +167,25 @@ final class LocalWebServer {
                 send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("POST", "/api/sync-history"):
                 let summary = try cliClient.syncHistory()
+                let restartResult = CodexMenuPreferences.restartCodexAfterSync(userDefaults: userDefaults)
+                    ? codexAppRestarter()
+                    : .disabled
                 let body = try jsonData(HistorySyncResponse(
                     ok: true,
-                    mirroredThreads: summary.mirroredThreads,
-                    message: summary.mirroredThreads > 0
-                        ? "历史会话同步完成：新增 \(summary.mirroredThreads) 个镜像会话。"
-                        : "历史会话已检查：没有需要补齐的镜像会话。"
+                    providerUpdatedThreads: summary.providerUpdatedThreads,
+                    indexedThreads: summary.indexedThreads,
+                    message: CodexDesktopController.historySyncStatusMessage(
+                        summary: summary,
+                        restartResult: restartResult
+                    )
                 ))
-                send(status: 200, contentType: "application/json", body: body, on: connection)
+                send(
+                    status: 200,
+                    contentType: "application/json",
+                    body: body,
+                    headers: ["X-Codex-Restart-Result": restartResult.rawValue],
+                    on: connection
+                )
             case ("POST", "/api/login"):
                 let request = try JSONDecoder().decode(LoginRequest.self, from: request.body)
                 try loginLauncher(cliClient, request.deviceAuth)
@@ -193,13 +206,29 @@ final class LocalWebServer {
                 send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("POST", "/api/preferences"):
                 let request = try JSONDecoder().decode(PreferencesRequest.self, from: request.body)
-                CodexMenuPreferences.setRestartCodexAfterSwitch(
-                    request.restartCodexAfterSwitch,
-                    userDefaults: userDefaults
-                )
+                if let restartCodexAfterSwitch = request.restartCodexAfterSwitch {
+                    CodexMenuPreferences.setRestartCodexAfterSwitch(
+                        restartCodexAfterSwitch,
+                        userDefaults: userDefaults
+                    )
+                }
+                if let restartCodexAfterSync = request.restartCodexAfterSync {
+                    CodexMenuPreferences.setRestartCodexAfterSync(
+                        restartCodexAfterSync,
+                        userDefaults: userDefaults
+                    )
+                }
+                if let syncHistoryDuringSwitch = request.syncHistoryDuringSwitch {
+                    CodexMenuPreferences.setSyncHistoryDuringSwitch(
+                        syncHistoryDuringSwitch,
+                        userDefaults: userDefaults
+                    )
+                }
                 onPreferencesChanged?()
                 let body = try jsonData(PreferencesResponse(
-                    restartCodexAfterSwitch: request.restartCodexAfterSwitch
+                    restartCodexAfterSwitch: CodexMenuPreferences.restartCodexAfterSwitch(userDefaults: userDefaults),
+                    restartCodexAfterSync: CodexMenuPreferences.restartCodexAfterSync(userDefaults: userDefaults),
+                    syncHistoryDuringSwitch: CodexMenuPreferences.syncHistoryDuringSwitch(userDefaults: userDefaults)
                 ))
                 send(status: 200, contentType: "application/json", body: body, on: connection)
             case ("POST", "/api/api-config"):
@@ -222,9 +251,43 @@ final class LocalWebServer {
                 onStateChanged?()
                 let response = try jsonData(state)
                 send(status: 200, contentType: "application/json", body: response, on: connection)
+            case ("POST", "/api/api-profiles/capture"):
+                let body = try JSONDecoder().decode(APIProfileCaptureRequest.self, from: request.body)
+                let state = try cliClient.captureCurrentAPIProfile(label: body.label)
+                onStateChanged?()
+                let response = try jsonData(state)
+                send(status: 200, contentType: "application/json", body: response, on: connection)
+            case ("POST", "/api/api-profiles/import-cc-switch"):
+                let state = try cliClient.importCCSwitchProfiles(scope: .all)
+                onStateChanged?()
+                let response = try jsonData(state)
+                send(status: 200, contentType: "application/json", body: response, on: connection)
+            case ("POST", "/api/api-profiles/switch"):
+                let body = try JSONDecoder().decode(APIProfileSwitchRequest.self, from: request.body)
+                let shouldSyncHistory = CodexMenuPreferences.syncHistoryDuringSwitch(userDefaults: userDefaults)
+                let state = try cliClient.switchAPIProfile(
+                    profileKey: body.profileKey,
+                    syncHistory: shouldSyncHistory
+                )
+                let restartResult = CodexMenuPreferences.restartCodexAfterSwitch(userDefaults: userDefaults)
+                    ? codexAppRestarter()
+                    : .disabled
+                onStateChanged?()
+                let response = try jsonData(state)
+                send(
+                    status: 200,
+                    contentType: "application/json",
+                    body: response,
+                    headers: ["X-Codex-Restart-Result": restartResult.rawValue],
+                    on: connection
+                )
             case ("POST", "/api/switch"):
                 let body = try JSONDecoder().decode(SwitchRequest.self, from: request.body)
-                let state = try cliClient.switchAccount(accountKey: body.accountKey)
+                let shouldSyncHistory = CodexMenuPreferences.syncHistoryDuringSwitch(userDefaults: userDefaults)
+                let state = try cliClient.switchAccount(
+                    accountKey: body.accountKey,
+                    syncHistory: shouldSyncHistory
+                )
                 let restartResult = CodexMenuPreferences.restartCodexAfterSwitch(userDefaults: userDefaults)
                     ? codexAppRestarter()
                     : .disabled
@@ -421,10 +484,14 @@ private struct ImportRequest: Codable {
 }
 
 private struct PreferencesRequest: Codable {
-    var restartCodexAfterSwitch: Bool
+    var restartCodexAfterSwitch: Bool?
+    var restartCodexAfterSync: Bool?
+    var syncHistoryDuringSwitch: Bool?
 
     enum CodingKeys: String, CodingKey {
         case restartCodexAfterSwitch = "restart_codex_after_switch"
+        case restartCodexAfterSync = "restart_codex_after_sync"
+        case syncHistoryDuringSwitch = "sync_history_during_switch"
     }
 }
 
@@ -454,11 +521,27 @@ private struct RenewalClearRequest: Codable {
     }
 }
 
+private struct APIProfileCaptureRequest: Codable {
+    var label: String
+}
+
+private struct APIProfileSwitchRequest: Codable {
+    var profileKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case profileKey = "profile_key"
+    }
+}
+
 private struct PreferencesResponse: Codable {
     var restartCodexAfterSwitch: Bool
+    var restartCodexAfterSync: Bool
+    var syncHistoryDuringSwitch: Bool
 
     enum CodingKeys: String, CodingKey {
         case restartCodexAfterSwitch = "restart_codex_after_switch"
+        case restartCodexAfterSync = "restart_codex_after_sync"
+        case syncHistoryDuringSwitch = "sync_history_during_switch"
     }
 }
 
@@ -485,12 +568,14 @@ private struct ActionResponse: Codable {
 
 private struct HistorySyncResponse: Codable {
     var ok: Bool
-    var mirroredThreads: Int
+    var providerUpdatedThreads: Int
+    var indexedThreads: Int
     var message: String
 
     enum CodingKeys: String, CodingKey {
         case ok
-        case mirroredThreads = "mirrored_threads"
+        case providerUpdatedThreads = "provider_updated_threads"
+        case indexedThreads = "indexed_threads"
         case message
     }
 }

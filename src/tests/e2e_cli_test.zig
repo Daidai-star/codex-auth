@@ -1242,15 +1242,21 @@ test "Scenario: Given custom-only history when running sync-history then the mir
 
     const codex_home = try codexHomeAlloc(gpa, home_root);
     defer gpa.free(codex_home);
+    try tmp.dir.makePath(".codex/accounts");
     try tmp.dir.makePath(".codex/sessions/2026/04/18");
 
     const rollout_path = try std.fs.path.join(gpa, &[_][]const u8{ codex_home, "sessions", "2026", "04", "18", "CUSTOM-THREAD.jsonl" });
     defer gpa.free(rollout_path);
     try std.fs.cwd().writeFile(.{
         .sub_path = rollout_path,
-        .data =
-            "{\"event\":\"session_meta\",\"payload\":{\"id\":\"CUSTOM-THREAD\",\"model_provider\":\"custom\",\"title\":\"Shared thread\"}}\n" ++
+        .data = "{\"event\":\"session_meta\",\"payload\":{\"id\":\"CUSTOM-THREAD\",\"model_provider\":\"custom\",\"title\":\"Shared thread\"}}\n" ++
             "{\"event\":\"user\",\"payload\":{\"text\":\"hello\"}}\n",
+    });
+    const registry_path = try std.fs.path.join(gpa, &[_][]const u8{ codex_home, "accounts", "registry.json" });
+    defer gpa.free(registry_path);
+    try std.fs.cwd().writeFile(.{
+        .sub_path = registry_path,
+        .data = "{\"active_auth_mode\":\"chatgpt\"}\n",
     });
 
     const db_path = try std.fs.path.join(gpa, &[_][]const u8{ codex_home, "state_5.sqlite" });
@@ -1314,7 +1320,7 @@ test "Scenario: Given custom-only history when running sync-history then the mir
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     try expectSuccess(result);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "history sync complete: mirrored_threads=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "history sync complete: provider_updated_threads=1 indexed_threads=1") != null);
 
     const verify = try std.process.Child.run(.{
         .allocator = gpa,
@@ -1330,7 +1336,7 @@ test "Scenario: Given custom-only history when running sync-history then the mir
     defer gpa.free(verify.stdout);
     defer gpa.free(verify.stderr);
     try expectSuccess(verify);
-    try std.testing.expectEqualStrings("custom|1\nopenai|1\n", verify.stdout);
+    try std.testing.expectEqualStrings("openai|1\n", verify.stdout);
 }
 
 test "Scenario: Given remove query with one match when running remove then it deletes immediately and prints a summary" {

@@ -40,10 +40,19 @@ struct CommandResult: Sendable {
 }
 
 struct HistorySyncSummary: Sendable {
-    var mirroredThreads: Int
+    var providerUpdatedThreads: Int
+    var indexedThreads: Int
+}
+
+enum APIProfileImportScope: Sendable {
+    case current
+    case all
+    case provider(String)
 }
 
 struct CLIClient: Sendable {
+    private static let skipHistorySyncEnvironmentKey = "CODEX_AUTH_SKIP_HISTORY_SYNC"
+
     let executablePath: String?
     private let commandRunner: CLICommandRunner
     private let codexEnvironment: [String: String]
@@ -94,8 +103,48 @@ struct CLIClient: Sendable {
         }
     }
 
-    func switchAccount(accountKey: String) throws -> CodexState {
-        let result = try run(["switch", "--account-key", accountKey, "--json"])
+    func switchAccount(accountKey: String, syncHistory: Bool = true) throws -> CodexState {
+        let result = try run(
+            ["switch", "--account-key", accountKey, "--json"],
+            additionalEnvironment: syncHistory ? [:] : [Self.skipHistorySyncEnvironmentKey: "1"]
+        )
+        return try decodeState(result.stdout)
+    }
+
+    func captureCurrentAPIProfile(label: String) throws -> CodexState {
+        let result = try run([
+            "api-profile",
+            "capture",
+            "--label",
+            label,
+            "--json",
+        ])
+        return try decodeState(result.stdout)
+    }
+
+    func switchAPIProfile(profileKey: String, syncHistory: Bool = true) throws -> CodexState {
+        let result = try run([
+            "api-profile",
+            "switch",
+            "--profile-key",
+            profileKey,
+            "--json",
+        ], additionalEnvironment: syncHistory ? [:] : [Self.skipHistorySyncEnvironmentKey: "1"])
+        return try decodeState(result.stdout)
+    }
+
+    func importCCSwitchProfiles(scope: APIProfileImportScope = .all) throws -> CodexState {
+        var args = ["api-profile", "import-cc-switch"]
+        switch scope {
+        case .current:
+            args.append("--current")
+        case .all:
+            args.append("--all")
+        case .provider(let providerID):
+            args.append(contentsOf: ["--provider-id", providerID])
+        }
+        args.append("--json")
+        let result = try run(args)
         return try decodeState(result.stdout)
     }
 
@@ -180,10 +229,18 @@ struct CLIClient: Sendable {
     }
 
     func run(_ args: [String]) throws -> CommandResult {
+        try run(args, additionalEnvironment: [:])
+    }
+
+    private func run(_ args: [String], additionalEnvironment: [String: String]) throws -> CommandResult {
         guard let executablePath else {
             throw CLIClientError.missingCLI
         }
-        let result = try commandRunner(executablePath, args, codexEnvironment)
+        var environment = codexEnvironment
+        for (key, value) in additionalEnvironment {
+            environment[key] = value
+        }
+        let result = try commandRunner(executablePath, args, environment)
         if result.status != 0 {
             throw CLIClientError.failed(status: result.status, stderr: result.stderrText)
         }
@@ -207,16 +264,19 @@ struct CLIClient: Sendable {
 
     private func decodeHistorySyncSummary(_ text: String) throws -> HistorySyncSummary {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let range = trimmed.range(of: "mirrored_threads=") else {
+        guard let providerUpdatedThreads = parseHistoryMetric("provider_updated_threads", from: trimmed) else {
             throw CLIClientError.invalidOutput("codex-auth 返回了无法识别的历史同步结果：\(trimmed)")
         }
+        let indexedThreads = parseHistoryMetric("indexed_threads", from: trimmed) ?? 0
+        return HistorySyncSummary(providerUpdatedThreads: providerUpdatedThreads, indexedThreads: indexedThreads)
+    }
 
-        let numberText = trimmed[range.upperBound...]
-            .prefix { $0.isNumber }
-        guard let mirroredThreads = Int(numberText) else {
-            throw CLIClientError.invalidOutput("codex-auth 返回了无法识别的历史同步结果：\(trimmed)")
+    private func parseHistoryMetric(_ name: String, from text: String) -> Int? {
+        guard let range = text.range(of: "\(name)=") else {
+            return nil
         }
-        return HistorySyncSummary(mirroredThreads: mirroredThreads)
+        let numberText = text[range.upperBound...].prefix { $0.isNumber }
+        return Int(numberText)
     }
 
     private func loadStateRefreshingActiveAccount() throws -> CodexState {
@@ -378,6 +438,7 @@ struct CLIClient: Sendable {
     ) -> [String: String] {
         var env = shellEnvironment
         env["CODEX_AUTH_SKIP_SERVICE_RECONCILE"] = "1"
+        env["CODEX_AUTH_DISABLE_BACKGROUND_ACCOUNT_NAME_REFRESH"] = "1"
         if let nodePath = resolveNodeExecutablePath(
             environment: shellEnvironment,
             isExecutable: isExecutable,

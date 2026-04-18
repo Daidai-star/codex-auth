@@ -32,11 +32,18 @@ private struct MenuDashboard: View {
                         CurrentAccountCard(account: active, accountCount: model.sortedAccounts.count)
                         UsageDashboardCard(account: active)
                         RenewalReminderCard(account: active)
+                    } else if model.state?.isAPIKeyMode == true {
+                        CurrentAPIProfileCard(
+                            profile: model.state?.activeAPIProfile,
+                            profileCount: model.sortedAPIProfiles.count
+                        )
                     } else {
                         EmptyAccountCard(accountCount: model.sortedAccounts.count)
                     }
 
                     QuickActionsCard(model: model)
+                    APIProfileToolsCard(model: model)
+                    APIProfileListCard(model: model)
                     AccountListCard(model: model)
                     AccountToolsCard(model: model)
                 }
@@ -140,6 +147,45 @@ private struct CurrentAccountCard: View {
                 HStack(spacing: 8) {
                     InfoPill(icon: "person.2", text: "\(accountCount) 个账号")
                     InfoPill(icon: "clock", text: account.lastUsageText)
+                }
+            }
+        }
+    }
+}
+
+private struct CurrentAPIProfileCard: View {
+    let profile: APIProfile?
+    let profileCount: Int
+
+    var body: some View {
+        SectionCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("当前模式")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Text(profile?.label ?? "API 密钥模式")
+                            .font(.title3.weight(.semibold))
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.85)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    CapsuleTag(text: "API", style: .warm)
+                }
+
+                Text(profile?.subtitle ?? "当前配置还没有保存成可切换档案。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+
+                HStack(spacing: 8) {
+                    InfoPill(icon: "server.rack", text: "\(profileCount) 个档案")
+                    InfoPill(icon: "tray.full", text: profile?.sourceLabel ?? "未保存")
+                    InfoPill(icon: "clock", text: profile?.usageLine ?? "未保存")
                 }
             }
         }
@@ -299,6 +345,141 @@ private struct EmptyAccountCard: View {
     }
 }
 
+private struct APIProfileToolsCard: View {
+    @ObservedObject var model: AppModel
+    @State private var profileLabel = ""
+
+    var body: some View {
+        SectionCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("API 配置")
+                        .font(.headline)
+
+                    Spacer()
+
+                    CapsuleTag(text: "\(model.sortedAPIProfiles.count)", style: .neutral)
+                }
+
+                Text(model.canCaptureCurrentAPIProfile
+                     ? "你可以继续用 cc switch 或手动方式写入当前 API 配置，然后在这里保存成可切换档案。"
+                     : "先把 Codex 切到 API 密钥模式，我们就能把当前配置保存成档案。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("从 cc switch 导入") {
+                    model.importCCSwitchProfiles()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.isBusy)
+
+                HStack(spacing: 8) {
+                    TextField("例如：CPA / OpenAI 本地", text: $profileLabel)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(model.isBusy || !model.canCaptureCurrentAPIProfile)
+
+                    Button("保存当前") {
+                        let label = profileLabel
+                        profileLabel = ""
+                        model.captureCurrentAPIProfile(label: label)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(model.isBusy || !model.canCaptureCurrentAPIProfile)
+                }
+            }
+        }
+    }
+}
+
+private struct APIProfileListCard: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        SectionCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("切换 API 配置")
+                        .font(.headline)
+
+                    Spacer()
+
+                    CapsuleTag(text: "\(model.sortedAPIProfiles.count)", style: .neutral)
+                }
+
+                if model.sortedAPIProfiles.isEmpty {
+                    Text("还没有 API 配置档案")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(model.sortedAPIProfiles) { profile in
+                            APIProfileSwitchRow(profile: profile, isBusy: model.isBusy) {
+                                model.switchAPIProfile(profile)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct APIProfileSwitchRow: View {
+    let profile: APIProfile
+    let isBusy: Bool
+    let onSwitch: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(profile.active ? Color.orange : Color.secondary.opacity(0.26))
+                .frame(width: 8, height: 24)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(profile.label)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if profile.active {
+                        CapsuleTag(text: "当前", style: .success)
+                    }
+                    CapsuleTag(text: profile.sourceLabel, style: .neutral)
+                }
+
+                Text(profile.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+
+                Text(profile.usageLine)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(profile.active ? "已选" : "切换") {
+                onSwitch()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(profile.active || isBusy)
+        }
+        .padding(9)
+        .background(profile.active ? Color.orange.opacity(0.08) : Color(nsColor: .controlBackgroundColor).opacity(0.52), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(profile.active ? Color.orange.opacity(0.3) : Color.secondary.opacity(0.18), lineWidth: 1)
+        }
+    }
+}
+
 private struct QuickActionsCard: View {
     @ObservedObject var model: AppModel
 
@@ -349,6 +530,29 @@ private struct QuickActionsCard: View {
                     )
                 )
                 .toggleStyle(.switch)
+
+                Toggle(
+                    "同步后自动重启 Codex App",
+                    isOn: Binding(
+                        get: { model.restartCodexAfterSync },
+                        set: { model.setRestartCodexAfterSync($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+
+                Toggle(
+                    "切换时同步历史会话",
+                    isOn: Binding(
+                        get: { model.syncHistoryDuringSwitch },
+                        set: { model.setSyncHistoryDuringSwitch($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+
+                Text("开启后，切换账号或 API 配置会先同步同一套历史；手动同步后也会自动重启 Codex App，让侧边栏立即刷新。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

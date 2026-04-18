@@ -2,11 +2,15 @@ const std = @import("std");
 
 const sqlite3_max_output_bytes = 32 * 1024 * 1024;
 const rollout_read_limit_bytes = 128 * 1024 * 1024;
+const session_index_read_limit_bytes = 16 * 1024 * 1024;
+const registry_read_limit_bytes = 8 * 1024 * 1024;
+const config_read_limit_bytes = 1024 * 1024;
 const openai_provider = "openai";
 const custom_provider = "custom";
 
 pub const SyncSummary = struct {
-    mirrored_threads: usize = 0,
+    provider_updated_threads: usize = 0,
+    indexed_threads: usize = 0,
 };
 
 const SyncThread = struct {
@@ -44,18 +48,6 @@ pub fn ensureDualProviderHistory(allocator: std.mem.Allocator, codex_home: []con
         else => return err,
     };
 
-    var thread_columns = loadThreadColumns(allocator, db_path) catch |err| switch (err) {
-        error.FileNotFound, error.CommandFailed => return summary,
-        else => {
-            std.log.warn("history sync skipped while loading columns: {s}", .{@errorName(err)});
-            return summary;
-        },
-    };
-    defer thread_columns.deinit(allocator);
-    defer freeOwnedStrings(allocator, thread_columns.items);
-
-    if (thread_columns.items.len == 0) return summary;
-
     var threads = loadThreads(allocator, db_path) catch |err| switch (err) {
         error.FileNotFound, error.CommandFailed => return summary,
         else => {
@@ -68,114 +60,189 @@ pub fn ensureDualProviderHistory(allocator: std.mem.Allocator, codex_home: []con
         threads.deinit(allocator);
     }
 
-    var known_threads = std.StringHashMap(void).init(allocator);
-    defer {
-        var it = known_threads.keyIterator();
-        while (it.next()) |key| allocator.free(key.*);
-        known_threads.deinit();
-    }
+    const current_provider = detectCurrentModelProvider(allocator, codex_home) catch |err| provider: {
+        std.log.warn("history sync skipped provider normalization: {s}", .{@errorName(err)});
+        break :provider null;
+    };
+    defer if (current_provider) |provider| allocator.free(provider);
 
-    var known_thread_ids = std.StringHashMap(void).init(allocator);
-    defer {
-        var it = known_thread_ids.keyIterator();
-        while (it.next()) |key| allocator.free(key.*);
-        known_thread_ids.deinit();
-    }
-
-    for (threads.items) |thread| {
-        const key = try buildMatchKey(allocator, thread.model_provider, thread);
-        const entry = try known_threads.getOrPut(key);
-        if (entry.found_existing) {
-            allocator.free(key);
+    if (current_provider) |provider| {
+        for (threads.items) |thread| {
+            if (std.mem.eql(u8, thread.model_provider, provider)) continue;
+            rewriteRolloutProviderInPlace(allocator, thread.rollout_path, thread.id, provider) catch |err| {
+                std.log.warn("history sync skipped rollout provider rewrite for {s}: {s}", .{ thread.id, @errorName(err) });
+                continue;
+            };
         }
-
-        const thread_id = try allocator.dupe(u8, thread.id);
-        const id_entry = try known_thread_ids.getOrPut(thread_id);
-        if (id_entry.found_existing) {
-            allocator.free(thread_id);
-        }
+        summary.provider_updated_threads = updateSqliteThreadProviders(allocator, db_path, provider) catch |err| updated: {
+            std.log.warn("history sync skipped provider database update: {s}", .{@errorName(err)});
+            break :updated 0;
+        };
     }
 
     const session_index_path = try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "session_index.jsonl" });
     defer allocator.free(session_index_path);
 
-    for (threads.items) |*thread| {
-        const target_provider = mirrorProvider(thread.model_provider) orelse continue;
-        const mirrored_id = try deterministicMirrorThreadId(allocator, thread.id, target_provider);
-        defer allocator.free(mirrored_id);
-        if (known_thread_ids.contains(mirrored_id)) continue;
+    var indexed_thread_ids = std.StringHashMap(void).init(allocator);
+    defer {
+        var it = indexed_thread_ids.keyIterator();
+        while (it.next()) |key| allocator.free(key.*);
+        indexed_thread_ids.deinit();
+    }
 
-        const target_key = try buildMatchKey(allocator, target_provider, thread.*);
-        defer allocator.free(target_key);
-        if (known_threads.contains(target_key)) continue;
+    loadSessionIndexIds(allocator, session_index_path, &indexed_thread_ids) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => {
+            std.log.warn("history sync skipped while loading session index: {s}", .{@errorName(err)});
+            return summary;
+        },
+    };
 
-        syncSingleThread(
-            allocator,
-            db_path,
-            session_index_path,
-            thread_columns.items,
-            thread,
-            target_provider,
-        ) catch |err| {
-            std.log.warn("history sync skipped thread {s}: {s}", .{ thread.id, @errorName(err) });
-            continue;
-        };
-
-        const owned_key = try allocator.dupe(u8, target_key);
-        const entry = try known_threads.getOrPut(owned_key);
-        if (entry.found_existing) allocator.free(owned_key);
-
-        const owned_id = try allocator.dupe(u8, mirrored_id);
-        const id_entry = try known_thread_ids.getOrPut(owned_id);
-        if (id_entry.found_existing) allocator.free(owned_id);
-        summary.mirrored_threads += 1;
+    for (threads.items) |thread| {
+        if (!indexed_thread_ids.contains(thread.id)) {
+            try appendSessionIndexEntry(
+                allocator,
+                session_index_path,
+                thread.id,
+                thread.title,
+                thread.updated_at_ms,
+            );
+            const indexed_id = try allocator.dupe(u8, thread.id);
+            const indexed_entry = try indexed_thread_ids.getOrPut(indexed_id);
+            if (indexed_entry.found_existing) {
+                allocator.free(indexed_id);
+            } else {
+                summary.indexed_threads += 1;
+            }
+        }
     }
     return summary;
 }
 
-fn syncSingleThread(
-    allocator: std.mem.Allocator,
-    db_path: []const u8,
-    session_index_path: []const u8,
-    thread_columns: []const []const u8,
-    source_thread: *const SyncThread,
-    target_provider: []const u8,
-) !void {
-    const new_id = try deterministicMirrorThreadId(allocator, source_thread.id, target_provider);
-    defer allocator.free(new_id);
-
-    const new_rollout_path = try buildMirroredRolloutPath(allocator, source_thread.rollout_path, new_id);
-    defer allocator.free(new_rollout_path);
-
-    try cloneRolloutWithMirroredMeta(
-        allocator,
-        source_thread.rollout_path,
-        new_rollout_path,
-        new_id,
-        target_provider,
-    );
-    try insertMirroredThread(
-        allocator,
-        db_path,
-        thread_columns,
-        source_thread.id,
-        new_id,
-        new_rollout_path,
-        target_provider,
-    );
-    try appendSessionIndexEntry(
-        allocator,
-        session_index_path,
-        new_id,
-        source_thread.title,
-        source_thread.updated_at_ms,
-    );
+fn detectCurrentModelProvider(allocator: std.mem.Allocator, codex_home: []const u8) !?[]u8 {
+    if (try detectProviderFromRegistry(allocator, codex_home)) |provider| return provider;
+    return try detectProviderFromConfig(allocator, codex_home);
 }
 
-fn mirrorProvider(provider: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, provider, openai_provider)) return custom_provider;
-    if (std.mem.eql(u8, provider, custom_provider)) return openai_provider;
+fn detectProviderFromRegistry(allocator: std.mem.Allocator, codex_home: []const u8) !?[]u8 {
+    const registry_path = try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "accounts", "registry.json" });
+    defer allocator.free(registry_path);
+
+    const data = std.fs.cwd().readFileAlloc(allocator, registry_path, registry_read_limit_bytes) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer allocator.free(data);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return null,
+    };
+
+    const active_mode = jsonObjectString(root, "active_auth_mode") orelse return null;
+    if (std.mem.eql(u8, active_mode, "chatgpt")) {
+        return try allocator.dupe(u8, openai_provider);
+    }
+    if (!std.mem.eql(u8, active_mode, "apikey")) return null;
+
+    if (jsonObjectString(root, "active_api_profile_key")) |active_profile_key| {
+        if (root.get("api_profiles")) |profiles_value| switch (profiles_value) {
+            .array => |profiles| {
+                for (profiles.items) |profile_value| {
+                    const profile = switch (profile_value) {
+                        .object => |object| object,
+                        else => continue,
+                    };
+                    const profile_key = jsonObjectString(profile, "profile_key") orelse continue;
+                    if (!std.mem.eql(u8, profile_key, active_profile_key)) continue;
+                    if (jsonObjectString(profile, "model_provider")) |provider| {
+                        if (provider.len > 0) return try allocator.dupe(u8, provider);
+                    }
+                }
+            },
+            else => {},
+        };
+    }
+
+    if (try detectProviderFromConfig(allocator, codex_home)) |provider| return provider;
+    return try allocator.dupe(u8, custom_provider);
+}
+
+fn detectProviderFromConfig(allocator: std.mem.Allocator, codex_home: []const u8) !?[]u8 {
+    const config_path = try std.fs.path.join(allocator, &[_][]const u8{ codex_home, "config.toml" });
+    defer allocator.free(config_path);
+
+    const data = std.fs.cwd().readFileAlloc(allocator, config_path, config_read_limit_bytes) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer allocator.free(data);
+
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (!std.mem.startsWith(u8, trimmed, "model_provider")) continue;
+        const eq_idx = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
+        const value = std.mem.trim(u8, trimmed[eq_idx + 1 ..], " \r\t");
+        if (value.len < 2 or value[0] != '"') continue;
+        const end_idx = std.mem.indexOfScalar(u8, value[1..], '"') orelse continue;
+        return try allocator.dupe(u8, value[1 .. 1 + end_idx]);
+    }
     return null;
+}
+
+fn jsonObjectString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .string => |text| text,
+        else => null,
+    };
+}
+
+fn updateSqliteThreadProviders(allocator: std.mem.Allocator, db_path: []const u8, target_provider: []const u8) !usize {
+    var sql = std.ArrayList(u8).empty;
+    defer sql.deinit(allocator);
+
+    try sql.appendSlice(allocator, "UPDATE threads SET model_provider = ");
+    try appendSqlStringLiteral(&sql, allocator, target_provider);
+    try sql.appendSlice(allocator, " WHERE model_provider <> ");
+    try appendSqlStringLiteral(&sql, allocator, target_provider);
+    try sql.appendSlice(allocator, "; SELECT changes();");
+
+    const result = try runSqliteCapture(allocator, db_path, sql.items);
+    defer freeRunResult(allocator, result);
+    try expectSqliteSuccess(result);
+
+    const trimmed = std.mem.trim(u8, result.stdout, " \r\n\t");
+    if (trimmed.len == 0) return 0;
+    return std.fmt.parseInt(usize, trimmed, 10) catch 0;
+}
+
+fn rewriteRolloutProviderInPlace(
+    allocator: std.mem.Allocator,
+    rollout_path: []const u8,
+    thread_id: []const u8,
+    target_provider: []const u8,
+) !void {
+    const data = try std.fs.cwd().readFileAlloc(allocator, rollout_path, rollout_read_limit_bytes);
+    defer allocator.free(data);
+
+    const first_line_end = std.mem.indexOfScalar(u8, data, '\n');
+    const first_line = if (first_line_end) |idx| data[0..idx] else data;
+    const rest = if (first_line_end) |idx| data[idx + 1 ..] else "";
+
+    const new_first_line = try rewriteRolloutSessionMetaLine(allocator, first_line, thread_id, target_provider);
+    defer allocator.free(new_first_line);
+
+    var out = try std.fs.cwd().createFile(rollout_path, .{ .truncate = true });
+    defer out.close();
+    try out.writeAll(new_first_line);
+    if (first_line_end != null) {
+        try out.writeAll("\n");
+        try out.writeAll(rest);
+    }
 }
 
 fn loadThreadColumns(allocator: std.mem.Allocator, db_path: []const u8) !std.ArrayList([]u8) {
@@ -339,11 +406,9 @@ fn deterministicMirrorThreadId(allocator: std.mem.Allocator, source_id: []const 
         allocator,
         "{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}-{X:0>2}{X:0>2}-{X:0>2}{X:0>2}-{X:0>2}{X:0>2}-{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}",
         .{
-            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
-            digest[8], digest[9],
-            digest[10], digest[11],
-            digest[12], digest[13],
-            digest[14], digest[15], digest[16], digest[17], digest[18], digest[19],
+            digest[0],  digest[1],  digest[2],  digest[3],  digest[4],  digest[5],  digest[6],  digest[7],
+            digest[8],  digest[9],  digest[10], digest[11], digest[12], digest[13], digest[14], digest[15],
+            digest[16], digest[17], digest[18], digest[19],
         },
     );
 }
@@ -355,6 +420,46 @@ fn buildMirroredRolloutPath(allocator: std.mem.Allocator, rollout_path: []const 
     const new_file_name = try std.fmt.allocPrint(allocator, "{s}{s}", .{ new_id, extension });
     defer allocator.free(new_file_name);
     return try std.fs.path.join(allocator, &[_][]const u8{ dir_name, new_file_name });
+}
+
+fn loadSessionIndexIds(
+    allocator: std.mem.Allocator,
+    session_index_path: []const u8,
+    indexed_thread_ids: *std.StringHashMap(void),
+) !void {
+    const data = std.fs.cwd().readFileAlloc(
+        allocator,
+        session_index_path,
+        session_index_read_limit_bytes,
+    ) catch |err| switch (err) {
+        error.FileNotFound => return error.FileNotFound,
+        else => return err,
+    };
+    defer allocator.free(data);
+
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (trimmed.len == 0) continue;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch continue;
+        defer parsed.deinit();
+
+        const obj = switch (parsed.value) {
+            .object => |object| object,
+            else => continue,
+        };
+
+        const id_value = obj.get("id") orelse continue;
+        const thread_id = switch (id_value) {
+            .string => |text| text,
+            else => continue,
+        };
+
+        const owned_id = try allocator.dupe(u8, thread_id);
+        const entry = try indexed_thread_ids.getOrPut(owned_id);
+        if (entry.found_existing) allocator.free(owned_id);
+    }
 }
 
 fn cloneRolloutWithMirroredMeta(

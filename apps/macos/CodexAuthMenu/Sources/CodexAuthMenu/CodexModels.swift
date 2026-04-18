@@ -21,21 +21,48 @@ struct CodexState: Codable, Sendable {
     var schemaVersion: Int
     var codexHome: String
     var activeAccountKey: String?
+    var activeAPIProfileKey: String?
+    var activeAuthMode: String?
     var api: ApiConfig
     var accounts: [Account]
+    var apiProfiles: [APIProfile]
     var refresh: RefreshSummary
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case codexHome = "codex_home"
         case activeAccountKey = "active_account_key"
+        case activeAPIProfileKey = "active_api_profile_key"
+        case activeAuthMode = "active_auth_mode"
         case api
         case accounts
+        case apiProfiles = "api_profiles"
         case refresh
     }
 
     var activeAccount: Account? {
         accounts.first { $0.active }
+    }
+
+    var activeAPIProfile: APIProfile? {
+        apiProfiles.first { $0.active }
+    }
+
+    var isAPIKeyMode: Bool {
+        activeAuthMode == "apikey"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        codexHome = try container.decode(String.self, forKey: .codexHome)
+        activeAccountKey = try container.decodeIfPresent(String.self, forKey: .activeAccountKey)
+        activeAPIProfileKey = try container.decodeIfPresent(String.self, forKey: .activeAPIProfileKey)
+        activeAuthMode = try container.decodeIfPresent(String.self, forKey: .activeAuthMode)
+        api = try container.decode(ApiConfig.self, forKey: .api)
+        accounts = try container.decodeIfPresent([Account].self, forKey: .accounts) ?? []
+        apiProfiles = try container.decodeIfPresent([APIProfile].self, forKey: .apiProfiles) ?? []
+        refresh = try container.decode(RefreshSummary.self, forKey: .refresh)
     }
 }
 
@@ -164,7 +191,7 @@ struct Account: Codable, Identifiable, Sendable {
         return Account.usageStatusPresentation(for: usage.status).summary
     }
 
-    private static func shortDateTime(_ timestamp: Int64) -> String {
+    static func shortDateTime(_ timestamp: Int64) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "M/d HH:mm"
@@ -221,6 +248,58 @@ struct Account: Codable, Identifiable, Sendable {
                 detail: "接口返回了 \(status)，这次没有拿到新的额度结果。"
             )
         }
+    }
+}
+
+struct APIProfile: Codable, Identifiable, Sendable {
+    var profileKey: String
+    var label: String
+    var modelProvider: String?
+    var providerName: String?
+    var model: String?
+    var baseURL: String?
+    var wireAPI: String?
+    var active: Bool
+    var createdAt: Int64
+    var lastUsedAt: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case profileKey = "profile_key"
+        case label
+        case modelProvider = "model_provider"
+        case providerName = "provider_name"
+        case model
+        case baseURL = "base_url"
+        case wireAPI = "wire_api"
+        case active
+        case createdAt = "created_at"
+        case lastUsedAt = "last_used_at"
+    }
+
+    var id: String { profileKey }
+
+    var isImportedFromCCSwitch: Bool {
+        profileKey.hasPrefix("ccswitch-")
+    }
+
+    var sourceLabel: String {
+        isImportedFromCCSwitch ? "cc switch" : "本地保存"
+    }
+
+    var subtitle: String {
+        let parts = [providerName, modelProvider, model, baseURL]
+            .compactMap { value -> String? in
+                guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return value
+            }
+        return parts.isEmpty ? "已保存的 API 配置档案" : parts.joined(separator: " · ")
+    }
+
+    var usageLine: String {
+        if let lastUsedAt {
+            return "上次切换：\(Account.shortDateTime(lastUsedAt))"
+        }
+        return "还没有切换记录"
     }
 }
 

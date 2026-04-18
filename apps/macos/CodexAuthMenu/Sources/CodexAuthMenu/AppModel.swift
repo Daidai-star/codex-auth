@@ -8,6 +8,8 @@ final class AppModel: ObservableObject {
     @Published var statusMessage = "正在加载"
     @Published var isBusy = false
     @Published var restartCodexAfterSwitch = CodexMenuPreferences.restartCodexAfterSwitch()
+    @Published var restartCodexAfterSync = CodexMenuPreferences.restartCodexAfterSync()
+    @Published var syncHistoryDuringSwitch = CodexMenuPreferences.syncHistoryDuringSwitch()
 
     let cliClient: CLIClient
     let webServer: LocalWebServer
@@ -61,18 +63,105 @@ final class AppModel: ObservableObject {
     func switchAccount(_ account: Account) {
         guard !account.active else { return }
         isBusy = true
-        statusMessage = "正在切换账号"
+        statusMessage = syncHistoryDuringSwitch ? "正在切换账号并同步历史会话" : "正在切换账号"
         let client = cliClient
         let shouldRestart = restartCodexAfterSwitch
+        let shouldSyncHistory = syncHistoryDuringSwitch
         Task.detached {
             do {
-                let newState = try client.switchAccount(accountKey: account.accountKey)
+                let newState = try client.switchAccount(
+                    accountKey: account.accountKey,
+                    syncHistory: shouldSyncHistory
+                )
                 let restartResult = shouldRestart
                     ? CodexDesktopController.restartRunningCodexApp()
                     : .disabled
                 await MainActor.run {
                     self.state = newState
-                    self.statusMessage = CodexDesktopController.switchStatusMessage(restartResult: restartResult)
+                    let historyNote = shouldSyncHistory
+                        ? "历史会话已随切换同步。"
+                        : "切换时历史同步已关闭。"
+                    self.statusMessage = "\(CodexDesktopController.switchStatusMessage(restartResult: restartResult))\(historyNote)"
+                    self.isBusy = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.statusMessage = error.localizedDescription
+                    self.isBusy = false
+                }
+            }
+        }
+    }
+
+    func switchAPIProfile(_ profile: APIProfile) {
+        guard !profile.active else { return }
+        isBusy = true
+        statusMessage = syncHistoryDuringSwitch ? "正在切换 API 配置并同步历史会话" : "正在切换 API 配置"
+        let client = cliClient
+        let shouldRestart = restartCodexAfterSwitch
+        let shouldSyncHistory = syncHistoryDuringSwitch
+        Task.detached {
+            do {
+                let newState = try client.switchAPIProfile(
+                    profileKey: profile.profileKey,
+                    syncHistory: shouldSyncHistory
+                )
+                let restartResult = shouldRestart
+                    ? CodexDesktopController.restartRunningCodexApp()
+                    : .disabled
+                await MainActor.run {
+                    self.state = newState
+                    let historyNote = shouldSyncHistory
+                        ? "历史会话已随切换同步。"
+                        : "切换时历史同步已关闭。"
+                    self.statusMessage = "\(CodexDesktopController.switchStatusMessage(restartResult: restartResult))\(historyNote)"
+                    self.isBusy = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.statusMessage = error.localizedDescription
+                    self.isBusy = false
+                }
+            }
+        }
+    }
+
+    func captureCurrentAPIProfile(label: String) {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            statusMessage = "请先填写一个 API 配置名称"
+            return
+        }
+        isBusy = true
+        statusMessage = "正在保存当前 API 配置"
+        let client = cliClient
+        Task.detached {
+            do {
+                let newState = try client.captureCurrentAPIProfile(label: trimmed)
+                await MainActor.run {
+                    self.state = newState
+                    self.statusMessage = "当前 API 配置已保存：\(trimmed)"
+                    self.isBusy = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.statusMessage = error.localizedDescription
+                    self.isBusy = false
+                }
+            }
+        }
+    }
+
+    func importCCSwitchProfiles() {
+        isBusy = true
+        statusMessage = "正在从 cc switch 导入 API 配置"
+        let client = cliClient
+        Task.detached {
+            do {
+                let newState = try client.importCCSwitchProfiles(scope: .all)
+                await MainActor.run {
+                    self.state = newState
+                    self.statusMessage = "已从 cc switch 导入 API 配置"
                     self.isBusy = false
                 }
             } catch {
@@ -130,13 +219,18 @@ final class AppModel: ObservableObject {
         isBusy = true
         statusMessage = "正在同步历史会话"
         let client = cliClient
+        let shouldRestart = restartCodexAfterSync
         Task.detached {
             do {
                 let summary = try client.syncHistory()
+                let restartResult = shouldRestart
+                    ? CodexDesktopController.restartRunningCodexApp()
+                    : .disabled
                 await MainActor.run {
-                    self.statusMessage = summary.mirroredThreads > 0
-                        ? "历史会话同步完成：新增 \(summary.mirroredThreads) 个镜像会话"
-                        : "历史会话已检查：没有需要补齐的镜像会话"
+                    self.statusMessage = CodexDesktopController.historySyncStatusMessage(
+                        summary: summary,
+                        restartResult: restartResult
+                    )
                     self.isBusy = false
                 }
             } catch {
@@ -152,6 +246,10 @@ final class AppModel: ObservableObject {
         (state?.accounts ?? []).sorted(by: Self.compareAccounts)
     }
 
+    var sortedAPIProfiles: [APIProfile] {
+        (state?.apiProfiles ?? []).sorted(by: Self.compareAPIProfiles)
+    }
+
     var featuredAccounts: [Account] {
         Array(sortedAccounts.prefix(8))
     }
@@ -161,12 +259,18 @@ final class AppModel: ObservableObject {
     }
 
     var apiStatusSummary: String {
-        guard let api = state?.api else { return "额度 API：读取中" }
-        return "额度 API：\(api.usage ? "已开启" : "已关闭")"
+        guard let state else { return "正在读取" }
+        let mode = state.isAPIKeyMode ? "API 密钥" : "账号"
+        let apiUsage = state.api.usage ? "已开启" : "已关闭"
+        return "\(mode)模式 · 额度 API：\(apiUsage)"
     }
 
     var canRefreshAllUsage: Bool {
         state?.api.usage == true
+    }
+
+    var canCaptureCurrentAPIProfile: Bool {
+        state?.isAPIKeyMode == true
     }
 
     func setRestartCodexAfterSwitch(_ enabled: Bool) {
@@ -174,8 +278,20 @@ final class AppModel: ObservableObject {
         CodexMenuPreferences.setRestartCodexAfterSwitch(enabled)
     }
 
+    func setRestartCodexAfterSync(_ enabled: Bool) {
+        restartCodexAfterSync = enabled
+        CodexMenuPreferences.setRestartCodexAfterSync(enabled)
+    }
+
+    func setSyncHistoryDuringSwitch(_ enabled: Bool) {
+        syncHistoryDuringSwitch = enabled
+        CodexMenuPreferences.setSyncHistoryDuringSwitch(enabled)
+    }
+
     func loadPreferences() {
         restartCodexAfterSwitch = CodexMenuPreferences.restartCodexAfterSwitch()
+        restartCodexAfterSync = CodexMenuPreferences.restartCodexAfterSync()
+        syncHistoryDuringSwitch = CodexMenuPreferences.syncHistoryDuringSwitch()
     }
 
     func openWebControl() {
@@ -211,8 +327,14 @@ final class AppModel: ObservableObject {
     private func loadedMessage(for refreshScope: UsageRefreshScope, state: CodexState) -> String {
         switch refreshScope {
         case .none:
+            if state.isAPIKeyMode {
+                return state.activeAPIProfile.map { "已就绪：\($0.label)" } ?? "已就绪：API 密钥模式"
+            }
             return "已就绪"
         case .activeOnly:
+            if state.isAPIKeyMode {
+                return "当前是 API 密钥模式，没有可同步的账号额度"
+            }
             if state.refresh.localOnlyMode || !state.api.usage {
                 if let active = state.activeAccount {
                     return "本地额度已同步：\(active.label)"
@@ -261,5 +383,19 @@ final class AppModel: ObservableObject {
         }
 
         return lhs.email.localizedLowercase < rhs.email.localizedLowercase
+    }
+
+    private static func compareAPIProfiles(lhs: APIProfile, rhs: APIProfile) -> Bool {
+        if lhs.active != rhs.active {
+            return lhs.active && !rhs.active
+        }
+
+        let lhsLastUsed = lhs.lastUsedAt ?? Int64.min
+        let rhsLastUsed = rhs.lastUsedAt ?? Int64.min
+        if lhsLastUsed != rhsLastUsed {
+            return lhsLastUsed > rhsLastUsed
+        }
+
+        return lhs.label.localizedLowercase < rhs.label.localizedLowercase
     }
 }

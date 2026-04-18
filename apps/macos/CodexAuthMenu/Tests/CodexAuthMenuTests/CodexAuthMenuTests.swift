@@ -132,6 +132,99 @@ final class CodexAuthMenuTests: XCTestCase {
         XCTAssertTrue(state.refresh.localOnlyMode)
     }
 
+    func testCLIClientCaptureImportAndSwitchAPIProfile() throws {
+        let client = CLIClient(
+            executablePath: "/mock/codex-auth",
+            preferredPath: nil,
+            environment: [:],
+            commandRunner: { _, args, _ in
+                if args == ["api-profile", "capture", "--label", "CPA", "--json"] {
+                    return Self.makeStateCommandResult(
+                        activeKey: nil,
+                        activeAPIProfileKey: "api-cpa",
+                        activeAuthMode: "apikey",
+                        apiProfilesJSON: """
+                        [
+                          {
+                            "profile_key": "api-cpa",
+                            "label": "CPA",
+                            "model_provider": "custom",
+                            "provider_name": "openai",
+                            "model": "gpt-5.4",
+                            "base_url": "http://localhost:8317/v1",
+                            "wire_api": "responses",
+                            "active": true,
+                            "created_at": 1713200000,
+                            "last_used_at": 1713200000
+                          }
+                        ]
+                        """
+                    )
+                }
+                if args == ["api-profile", "import-cc-switch", "--all", "--json"] {
+                    return Self.makeStateCommandResult(
+                        activeKey: nil,
+                        activeAPIProfileKey: "ccswitch-cpa",
+                        activeAuthMode: "apikey",
+                        apiProfilesJSON: """
+                        [
+                          {
+                            "profile_key": "ccswitch-cpa",
+                            "label": "CPA",
+                            "model_provider": "custom",
+                            "provider_name": "openai",
+                            "model": "gpt-5.4",
+                            "base_url": "http://localhost:8317/v1",
+                            "wire_api": "responses",
+                            "active": true,
+                            "created_at": 1713200000,
+                            "last_used_at": 1713200000
+                          }
+                        ]
+                        """
+                    )
+                }
+                if args == ["api-profile", "switch", "--profile-key", "api-cpa", "--json"] {
+                    return Self.makeStateCommandResult(
+                        activeKey: nil,
+                        activeAPIProfileKey: "api-cpa",
+                        activeAuthMode: "apikey",
+                        apiProfilesJSON: """
+                        [
+                          {
+                            "profile_key": "api-cpa",
+                            "label": "CPA",
+                            "model_provider": "custom",
+                            "provider_name": "openai",
+                            "model": "gpt-5.4",
+                            "base_url": "http://localhost:8317/v1",
+                            "wire_api": "responses",
+                            "active": true,
+                            "created_at": 1713200000,
+                            "last_used_at": 1713200000
+                          }
+                        ]
+                        """
+                    )
+                }
+                return CommandResult(stdout: Data(), stderr: Data("unexpected".utf8), status: 1)
+            },
+            shellResolver: { _, _ in nil }
+        )
+
+        let captured = try client.captureCurrentAPIProfile(label: "CPA")
+        XCTAssertTrue(captured.isAPIKeyMode)
+        XCTAssertEqual(captured.activeAPIProfile?.label, "CPA")
+
+        let imported = try client.importCCSwitchProfiles(scope: .all)
+        XCTAssertEqual(imported.activeAPIProfileKey, "ccswitch-cpa")
+        XCTAssertEqual(imported.activeAPIProfile?.sourceLabel, "cc switch")
+
+        let switched = try client.switchAPIProfile(profileKey: "api-cpa")
+        XCTAssertEqual(switched.activeAPIProfileKey, "api-cpa")
+        XCTAssertEqual(switched.activeAPIProfile?.providerName, "openai")
+    }
+
     func testCLIClientInjectsNodeExecutableFromUserNVMDirectory() throws {
         let tempRoot = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -170,7 +263,7 @@ final class CodexAuthMenuTests: XCTestCase {
         _ = try client.loadState(refreshScope: .none)
     }
 
-    func testCLIClientSyncHistoryParsesMirroredThreadCount() throws {
+    func testCLIClientSyncHistoryParsesProviderUpdateCount() throws {
         let client = CLIClient(
             executablePath: "/mock/codex-auth",
             preferredPath: nil,
@@ -178,7 +271,7 @@ final class CodexAuthMenuTests: XCTestCase {
             commandRunner: { _, args, _ in
                 XCTAssertEqual(args, ["sync-history"])
                 return CommandResult(
-                    stdout: Data("history sync complete: mirrored_threads=3\n".utf8),
+                    stdout: Data("history sync complete: provider_updated_threads=3 indexed_threads=1\n".utf8),
                     stderr: Data(),
                     status: 0
                 )
@@ -187,7 +280,8 @@ final class CodexAuthMenuTests: XCTestCase {
         )
 
         let summary = try client.syncHistory()
-        XCTAssertEqual(summary.mirroredThreads, 3)
+        XCTAssertEqual(summary.providerUpdatedThreads, 3)
+        XCTAssertEqual(summary.indexedThreads, 1)
     }
 
     func testAccountUsageAndRenewalCopyUsesFriendlyText() {
@@ -291,6 +385,7 @@ final class CodexAuthMenuTests: XCTestCase {
         let snapshot = mock.snapshot()
         XCTAssertEqual(snapshot.activeRefreshCalls, 1)
         XCTAssertEqual(snapshot.switchKeys, ["acct-secondary"])
+        XCTAssertEqual(snapshot.historySkipFlags.map { $0 ?? "" }, [""])
         XCTAssertEqual(switchResponse.headers["x-codex-restart-result"], "disabled")
     }
 
@@ -337,12 +432,23 @@ final class CodexAuthMenuTests: XCTestCase {
     func testLocalWebServerAPIConfigRefreshAllManualRenewalAndHistorySyncEndpoints() async throws {
         let tempRoot = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let suiteName = "CodexAuthMenuTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.set(false, forKey: "restartCodexAfterSync")
+        defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let mock = AdvancedMockCLI()
         let client = makeClient(home: tempRoot) { executablePath, args, environment in
             try mock.run(executablePath, args, environment)
         }
-        let server = LocalWebServer(cliClient: client)
+        let server = LocalWebServer(
+            cliClient: client,
+            userDefaults: defaults,
+            codexAppRestarter: {
+                XCTFail("history sync restart should be disabled in this test")
+                return .failed
+            }
+        )
         defer { server.stop() }
 
         try server.start()
@@ -385,10 +491,12 @@ final class CodexAuthMenuTests: XCTestCase {
             method: "POST"
         )
         XCTAssertEqual(historySync.statusCode, 200)
+        XCTAssertEqual(historySync.headers["x-codex-restart-result"], "disabled")
         let historyPayload = try JSONDecoder().decode(HistorySyncPayload.self, from: historySync.body)
         XCTAssertTrue(historyPayload.ok)
-        XCTAssertEqual(historyPayload.mirroredThreads, 2)
-        XCTAssertTrue(historyPayload.message.contains("新增 2 个镜像会话"))
+        XCTAssertEqual(historyPayload.providerUpdatedThreads, 2)
+        XCTAssertEqual(historyPayload.indexedThreads, 0)
+        XCTAssertTrue(historyPayload.message.contains("更新 2 条会话归属"))
 
         let setRenewal = try await request(
             baseURL: controlURL,
@@ -413,6 +521,64 @@ final class CodexAuthMenuTests: XCTestCase {
         let clearedState = try JSONDecoder().decode(CodexState.self, from: clearedRenewal.body)
         XCTAssertNil(clearedState.activeAccount?.renewal.nextRenewalAt)
         XCTAssertEqual(clearedState.activeAccount?.renewal.status, "missing")
+    }
+
+    func testLocalWebServerAPIProfileCaptureImportAndSwitchEndpoints() async throws {
+        let tempRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let suiteName = "CodexAuthMenuTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.set(false, forKey: "restartCodexAfterSwitch")
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let mock = APIProfileMockCLI()
+        let client = makeClient(home: tempRoot) { executablePath, args, environment in
+            try mock.run(executablePath, args, environment)
+        }
+        let server = LocalWebServer(
+            cliClient: client,
+            userDefaults: defaults,
+            codexAppRestarter: { .restarted }
+        )
+        defer { server.stop() }
+
+        try server.start()
+        let controlURL = try waitForControlURL(server)
+        let token = try XCTUnwrap(Self.token(from: controlURL))
+
+        let captured = try await request(
+            baseURL: controlURL,
+            path: "/api/api-profiles/capture",
+            token: token,
+            method: "POST",
+            body: Data(#"{"label":"CPA"}"#.utf8)
+        )
+        XCTAssertEqual(captured.statusCode, 200)
+        let capturedState = try JSONDecoder().decode(CodexState.self, from: captured.body)
+        XCTAssertTrue(capturedState.isAPIKeyMode)
+        XCTAssertEqual(capturedState.activeAPIProfile?.label, "CPA")
+
+        let imported = try await request(
+            baseURL: controlURL,
+            path: "/api/api-profiles/import-cc-switch",
+            token: token,
+            method: "POST"
+        )
+        XCTAssertEqual(imported.statusCode, 200)
+        let importedState = try JSONDecoder().decode(CodexState.self, from: imported.body)
+        XCTAssertEqual(importedState.activeAPIProfile?.sourceLabel, "cc switch")
+
+        let switched = try await request(
+            baseURL: controlURL,
+            path: "/api/api-profiles/switch",
+            token: token,
+            method: "POST",
+            body: Data(#"{"profile_key":"api-cpa"}"#.utf8)
+        )
+        XCTAssertEqual(switched.statusCode, 200)
+        XCTAssertEqual(switched.headers["x-codex-restart-result"], "disabled")
+        let switchedState = try JSONDecoder().decode(CodexState.self, from: switched.body)
+        XCTAssertEqual(switchedState.activeAPIProfileKey, "api-cpa")
     }
 
     func testLocalWebServerPreferencesLoginAndRestartHeader() async throws {
@@ -460,10 +626,10 @@ final class CodexAuthMenuTests: XCTestCase {
             token: token
         )
         XCTAssertEqual(initialPreferences.statusCode, 200)
-        XCTAssertEqual(
-            try JSONDecoder().decode(PreferencesPayload.self, from: initialPreferences.body).restartCodexAfterSwitch,
-            true
-        )
+        let initialPreferencesPayload = try JSONDecoder().decode(PreferencesPayload.self, from: initialPreferences.body)
+        XCTAssertTrue(initialPreferencesPayload.restartCodexAfterSwitch)
+        XCTAssertTrue(initialPreferencesPayload.restartCodexAfterSync)
+        XCTAssertTrue(initialPreferencesPayload.syncHistoryDuringSwitch)
 
         let loginResponse = try await request(
             baseURL: controlURL,
@@ -506,13 +672,13 @@ final class CodexAuthMenuTests: XCTestCase {
             path: "/api/preferences",
             token: token,
             method: "POST",
-            body: Data(#"{"restart_codex_after_switch":false}"#.utf8)
+            body: Data(#"{"restart_codex_after_switch":false,"restart_codex_after_sync":false,"sync_history_during_switch":false}"#.utf8)
         )
         XCTAssertEqual(disabledPreferences.statusCode, 200)
-        XCTAssertEqual(
-            try JSONDecoder().decode(PreferencesPayload.self, from: disabledPreferences.body).restartCodexAfterSwitch,
-            false
-        )
+        let disabledPreferencesPayload = try JSONDecoder().decode(PreferencesPayload.self, from: disabledPreferences.body)
+        XCTAssertFalse(disabledPreferencesPayload.restartCodexAfterSwitch)
+        XCTAssertFalse(disabledPreferencesPayload.restartCodexAfterSync)
+        XCTAssertFalse(disabledPreferencesPayload.syncHistoryDuringSwitch)
         XCTAssertEqual(preferenceChangedCount, 1)
 
         let disabledSwitch = try await request(
@@ -525,19 +691,20 @@ final class CodexAuthMenuTests: XCTestCase {
         XCTAssertEqual(disabledSwitch.statusCode, 200)
         XCTAssertEqual(disabledSwitch.headers["x-codex-restart-result"], "disabled")
         XCTAssertEqual(actions.snapshot().restartCalls, 0)
+        XCTAssertEqual(mock.snapshot().historySkipFlags.map { $0 ?? "" }, ["1"])
 
         let enabledPreferences = try await request(
             baseURL: controlURL,
             path: "/api/preferences",
             token: token,
             method: "POST",
-            body: Data(#"{"restart_codex_after_switch":true}"#.utf8)
+            body: Data(#"{"restart_codex_after_switch":true,"restart_codex_after_sync":true,"sync_history_during_switch":true}"#.utf8)
         )
         XCTAssertEqual(enabledPreferences.statusCode, 200)
-        XCTAssertEqual(
-            try JSONDecoder().decode(PreferencesPayload.self, from: enabledPreferences.body).restartCodexAfterSwitch,
-            true
-        )
+        let enabledPreferencesPayload = try JSONDecoder().decode(PreferencesPayload.self, from: enabledPreferences.body)
+        XCTAssertTrue(enabledPreferencesPayload.restartCodexAfterSwitch)
+        XCTAssertTrue(enabledPreferencesPayload.restartCodexAfterSync)
+        XCTAssertTrue(enabledPreferencesPayload.syncHistoryDuringSwitch)
         XCTAssertEqual(preferenceChangedCount, 2)
 
         let enabledSwitch = try await request(
@@ -550,6 +717,7 @@ final class CodexAuthMenuTests: XCTestCase {
         XCTAssertEqual(enabledSwitch.statusCode, 200)
         XCTAssertEqual(enabledSwitch.headers["x-codex-restart-result"], "restarted")
         XCTAssertEqual(actions.snapshot().restartCalls, 1)
+        XCTAssertEqual(mock.snapshot().historySkipFlags.map { $0 ?? "" }, ["1", ""])
     }
 
     func testHTTPRequestParserWaitsForCompleteBody() {
@@ -657,6 +825,7 @@ private final class MockCLI: @unchecked Sendable {
     private let lock = NSLock()
     private var activeRefreshCallCount = 0
     private var switchAccountKeys: [String] = []
+    private var switchHistorySkipFlags: [String?] = []
 
     func run(_ executablePath: String, _ args: [String], _ environment: [String: String]) throws -> CommandResult {
         lock.lock()
@@ -678,6 +847,7 @@ private final class MockCLI: @unchecked Sendable {
            args[3] == "--json" {
             let accountKey = args[2]
             switchAccountKeys.append(accountKey)
+            switchHistorySkipFlags.append(environment["CODEX_AUTH_SKIP_HISTORY_SYNC"])
             return state(activeKey: accountKey)
         }
 
@@ -688,10 +858,10 @@ private final class MockCLI: @unchecked Sendable {
         )
     }
 
-    func snapshot() -> (activeRefreshCalls: Int, switchKeys: [String]) {
+    func snapshot() -> (activeRefreshCalls: Int, switchKeys: [String], historySkipFlags: [String?]) {
         lock.lock()
         defer { lock.unlock() }
-        return (activeRefreshCallCount, switchAccountKeys)
+        return (activeRefreshCallCount, switchAccountKeys, switchHistorySkipFlags)
     }
 
     private func state(
@@ -717,7 +887,8 @@ private final class AdvancedMockCLI: @unchecked Sendable {
     private let lock = NSLock()
     private var apiUsageEnabled = false
     private var primaryRenewalDate: String? = "2026-05-01"
-    private var mirroredThreads = 2
+    private var providerUpdatedThreads = 2
+    private var indexedThreads = 0
 
     func run(_ executablePath: String, _ args: [String], _ environment: [String: String]) throws -> CommandResult {
         lock.lock()
@@ -743,7 +914,7 @@ private final class AdvancedMockCLI: @unchecked Sendable {
             return CommandResult(stdout: Data(), stderr: Data(), status: 0)
         }
         if args == ["sync-history"] {
-            let stdout = "history sync complete: mirrored_threads=\(mirroredThreads)\n"
+            let stdout = "history sync complete: provider_updated_threads=\(providerUpdatedThreads) indexed_threads=\(indexedThreads)\n"
             return CommandResult(stdout: Data(stdout.utf8), stderr: Data(), status: 0)
         }
         if args == ["renewal", "set", "--account-key", "acct-primary", "--date", "2026-06-15", "--json"] {
@@ -874,6 +1045,59 @@ private final class AdvancedMockCLI: @unchecked Sendable {
     }
 }
 
+private final class APIProfileMockCLI: @unchecked Sendable {
+    func run(_ executablePath: String, _ args: [String], _ environment: [String: String]) throws -> CommandResult {
+        _ = executablePath
+        _ = environment
+
+        if args == ["--version"] {
+            return CommandResult(stdout: Data("codex-auth 1.0.1-alpha.1\n".utf8), stderr: Data(), status: 0)
+        }
+        if args == ["list", "--json"] {
+            return state(active: nil)
+        }
+        if args == ["api-profile", "capture", "--label", "CPA", "--json"] {
+            return state(active: "api-cpa")
+        }
+        if args == ["api-profile", "import-cc-switch", "--all", "--json"] {
+            return state(active: "ccswitch-cpa")
+        }
+        if args == ["api-profile", "switch", "--profile-key", "api-cpa", "--json"] {
+            return state(active: "api-cpa")
+        }
+
+        return CommandResult(
+            stdout: Data(),
+            stderr: Data("unexpected args: \(args.joined(separator: " "))".utf8),
+            status: 1
+        )
+    }
+
+    private func state(active: String?) -> CommandResult {
+        return CodexAuthMenuTests.makeStateCommandResult(
+            activeKey: nil,
+            activeAPIProfileKey: active,
+            activeAuthMode: "apikey",
+            apiProfilesJSON: """
+            [
+              {
+                "profile_key": "\(active == "ccswitch-cpa" ? "ccswitch-cpa" : "api-cpa")",
+                "label": "CPA",
+                "model_provider": "custom",
+                "provider_name": "openai",
+                "model": "gpt-5.4",
+                "base_url": "http://localhost:8317/v1",
+                "wire_api": "responses",
+                "active": \(active == "api-cpa" || active == "ccswitch-cpa" ? "true" : "false"),
+                "created_at": 1713200000,
+                "last_used_at": 1713200000
+              }
+            ]
+            """
+        )
+    }
+}
+
 private struct HealthPayload: Decodable {
     var ok: Bool
     var cliPath: String
@@ -892,9 +1116,13 @@ private struct ErrorPayload: Decodable {
 
 private struct PreferencesPayload: Decodable {
     var restartCodexAfterSwitch: Bool
+    var restartCodexAfterSync: Bool
+    var syncHistoryDuringSwitch: Bool
 
     enum CodingKeys: String, CodingKey {
         case restartCodexAfterSwitch = "restart_codex_after_switch"
+        case restartCodexAfterSync = "restart_codex_after_sync"
+        case syncHistoryDuringSwitch = "sync_history_during_switch"
     }
 }
 
@@ -905,12 +1133,14 @@ private struct ActionPayload: Decodable {
 
 private struct HistorySyncPayload: Decodable {
     var ok: Bool
-    var mirroredThreads: Int
+    var providerUpdatedThreads: Int
+    var indexedThreads: Int
     var message: String
 
     enum CodingKeys: String, CodingKey {
         case ok
-        case mirroredThreads = "mirrored_threads"
+        case providerUpdatedThreads = "provider_updated_threads"
+        case indexedThreads = "indexed_threads"
         case message
     }
 }
@@ -927,7 +1157,10 @@ private enum TestError: Error {
 
 private extension CodexAuthMenuTests {
     static func makeStateCommandResult(
-        activeKey: String,
+        activeKey: String? = "acct-primary",
+        activeAPIProfileKey: String? = nil,
+        activeAuthMode: String? = "chatgpt",
+        apiProfilesJSON: String = "[]",
         apiUsage: Bool = true,
         apiRenewal: Bool = false,
         usageRequested: Bool = false,
@@ -937,11 +1170,16 @@ private extension CodexAuthMenuTests {
     ) -> CommandResult {
         let primaryActive = activeKey == "acct-primary"
         let secondaryActive = activeKey == "acct-secondary"
+        let activeKeyJSON = activeKey.map { "\"\($0)\"" } ?? "null"
+        let activeAPIProfileKeyJSON = activeAPIProfileKey.map { "\"\($0)\"" } ?? "null"
+        let activeAuthModeJSON = activeAuthMode.map { "\"\($0)\"" } ?? "null"
         let json = """
         {
           "schema_version": 1,
           "codex_home": "/tmp/mock-codex",
-          "active_account_key": "\(activeKey)",
+          "active_account_key": \(activeKeyJSON),
+          "active_api_profile_key": \(activeAPIProfileKeyJSON),
+          "active_auth_mode": \(activeAuthModeJSON),
           "api": {
             "usage": \(apiUsage),
             "account": true,
@@ -1025,6 +1263,7 @@ private extension CodexAuthMenuTests {
               }
             }
           ],
+          "api_profiles": \(apiProfilesJSON),
           "refresh": {
             "usage_requested": \(usageRequested),
             "attempted": \(attempted),

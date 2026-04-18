@@ -227,6 +227,38 @@ fn writeRenewalJson(out: *std.Io.Writer, renewal: registry.RenewalInfo) !void {
     try out.writeAll("}");
 }
 
+fn writeApiProfileJson(
+    out: *std.Io.Writer,
+    reg: *registry.Registry,
+    profile: registry.ApiProfileRecord,
+) !void {
+    const active = if (reg.active_api_profile_key) |key|
+        std.mem.eql(u8, key, profile.profile_key)
+    else
+        false;
+    try out.writeAll("{\"profile_key\":");
+    try jsonString(out, profile.profile_key);
+    try out.writeAll(",\"label\":");
+    try jsonString(out, profile.label);
+    try out.writeAll(",\"model_provider\":");
+    try writeOptionalJsonString(out, profile.model_provider);
+    try out.writeAll(",\"provider_name\":");
+    try writeOptionalJsonString(out, profile.provider_name);
+    try out.writeAll(",\"model\":");
+    try writeOptionalJsonString(out, profile.model);
+    try out.writeAll(",\"base_url\":");
+    try writeOptionalJsonString(out, profile.base_url);
+    try out.writeAll(",\"wire_api\":");
+    try writeOptionalJsonString(out, profile.wire_api);
+    try out.writeAll(",\"active\":");
+    try writeOptionalBool(out, active);
+    try out.writeAll(",\"created_at\":");
+    try out.print("{d}", .{profile.created_at});
+    try out.writeAll(",\"last_used_at\":");
+    try writeOptionalI64(out, profile.last_used_at);
+    try out.writeAll("}");
+}
+
 fn usageOverrideForAccount(
     usage_overrides: ?[]const ?[]const u8,
     account_idx: usize,
@@ -254,6 +286,10 @@ pub fn writeAccountsJson(
     try jsonString(out, codex_home);
     try out.writeAll(",\"active_account_key\":");
     try writeOptionalJsonString(out, reg.active_account_key);
+    try out.writeAll(",\"active_api_profile_key\":");
+    try writeOptionalJsonString(out, reg.active_api_profile_key);
+    try out.writeAll(",\"active_auth_mode\":");
+    try writeOptionalJsonString(out, authModeJsonLabel(reg.active_auth_mode));
     try out.writeAll(",\"api\":{\"usage\":");
     try writeOptionalBool(out, reg.api.usage);
     try out.writeAll(",\"account\":");
@@ -293,6 +329,11 @@ pub fn writeAccountsJson(
         try out.writeAll(",\"renewal\":");
         try writeRenewalJson(out, rec.renewal);
         try out.writeAll("}");
+    }
+    try out.writeAll("],\"api_profiles\":[");
+    for (reg.api_profiles.items, 0..) |profile, idx| {
+        if (idx != 0) try out.writeAll(",");
+        try writeApiProfileJson(out, reg, profile);
     }
     try out.writeAll("],\"refresh\":{\"usage_requested\":");
     try writeOptionalBool(out, refresh.usage_requested);
@@ -420,6 +461,7 @@ fn runMainArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .login => |opts| try handleLogin(allocator, codex_home.?, opts),
         .import_auth => |opts| try handleImport(allocator, codex_home.?, opts),
         .switch_account => |opts| try handleSwitch(allocator, codex_home.?, opts),
+        .api_profile => |opts| try handleApiProfile(allocator, codex_home.?, opts),
         .renewal => |opts| try handleRenewal(allocator, codex_home.?, opts),
         .remove_account => |opts| try handleRemove(allocator, codex_home.?, opts),
         .clean => try handleClean(allocator, codex_home.?),
@@ -432,6 +474,14 @@ fn runMainArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
 fn isHandledCliError(err: anyerror) bool {
     return err == error.AccountNotFound or
+        err == error.ApiProfileNotFound or
+        err == error.ApiKeyModeRequired or
+        err == error.AuthFileNotFound or
+        err == error.ConfigFileNotFound or
+        err == error.CcSwitchDbNotFound or
+        err == error.CcSwitchProviderNotFound or
+        err == error.Sqlite3NotFound or
+        err == error.SqliteQueryFailed or
         err == error.CodexLoginFailed or
         err == error.InvalidRenewalDate or
         err == error.RemoveConfirmationUnavailable or
@@ -1393,6 +1443,145 @@ fn handleSwitch(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.
     try registry.saveRegistry(allocator, codex_home, &reg);
 }
 
+fn printApiProfileMessage(action: []const u8, profile_key: []const u8, label: ?[]const u8) !void {
+    var stdout: io_util.Stdout = undefined;
+    stdout.init();
+    const out = stdout.out();
+    if (label) |value| {
+        try out.print("{s}: {s} ({s})\n", .{ action, profile_key, value });
+    } else {
+        try out.print("{s}: {s}\n", .{ action, profile_key });
+    }
+    try out.flush();
+}
+
+fn printApiProfileImportSummary(summary: registry.CcSwitchImportSummary) !void {
+    var stdout: io_util.Stdout = undefined;
+    stdout.init();
+    const out = stdout.out();
+    try out.print(
+        "imported API profiles from cc-switch: imported={d}, updated={d}, skipped={d}\n",
+        .{ summary.imported, summary.updated, summary.skipped },
+    );
+    try out.flush();
+}
+
+fn handleApiProfile(allocator: std.mem.Allocator, codex_home: []const u8, opts: cli.ApiProfileOptions) !void {
+    var reg = try registry.loadRegistry(allocator, codex_home);
+    defer reg.deinit(allocator);
+    if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+        try registry.saveRegistry(allocator, codex_home, &reg);
+    }
+
+    switch (opts) {
+        .capture => |capture_opts| {
+            const profile_key = registry.captureCurrentApiProfile(allocator, codex_home, &reg, capture_opts.label) catch |err| switch (err) {
+                error.ApiKeyModeRequired => {
+                    try printHandledError(
+                        "current auth is not in API-key mode.",
+                        "Switch Codex to an API-key config first, then run `codex-auth api-profile capture --label <label>`.",
+                    );
+                    return err;
+                },
+                error.AuthFileNotFound => {
+                    try printHandledError("active auth.json was not found.", null);
+                    return err;
+                },
+                error.ConfigFileNotFound => {
+                    try printHandledError(
+                        "active config.toml was not found.",
+                        "Save the provider config first, then capture it again.",
+                    );
+                    return err;
+                },
+                else => return err,
+            };
+            defer allocator.free(profile_key);
+            try registry.saveRegistry(allocator, codex_home, &reg);
+            if (capture_opts.json) {
+                try printAccountsJson(allocator, codex_home, &reg, null, .{});
+            } else {
+                try printApiProfileMessage("saved API profile", profile_key, capture_opts.label);
+            }
+        },
+        .switch_profile => |switch_opts| {
+            if (registry.findApiProfileIndexByKey(&reg, switch_opts.profile_key) == null) {
+                try printHandledError(
+                    "API profile not found.",
+                    "Run `codex-auth list --json` to inspect saved `api_profiles` keys.",
+                );
+                return error.ApiProfileNotFound;
+            }
+            try registry.activateApiProfileByKey(allocator, codex_home, &reg, switch_opts.profile_key);
+            try registry.saveRegistry(allocator, codex_home, &reg);
+            if (switch_opts.json) {
+                try printAccountsJson(allocator, codex_home, &reg, null, .{});
+            } else {
+                try printApiProfileMessage("switched API profile", switch_opts.profile_key, null);
+            }
+        },
+        .import_cc_switch => |import_opts| {
+            const db_path = if (import_opts.db_path) |path|
+                try allocator.dupe(u8, path)
+            else
+                try registry.defaultCcSwitchDbPath(allocator);
+            defer allocator.free(db_path);
+
+            const selector: registry.CcSwitchImportSelector = if (import_opts.all)
+                .all
+            else if (import_opts.provider_id) |provider_id|
+                .{ .provider_id = provider_id }
+            else
+                .current;
+
+            const summary = registry.importCcSwitchApiProfiles(allocator, codex_home, &reg, db_path, selector) catch |err| switch (err) {
+                error.CcSwitchDbNotFound => {
+                    try printHandledError(
+                        "cc-switch database was not found.",
+                        "Install cc-switch first or pass `--db-path <path>` to import a specific database.",
+                    );
+                    return err;
+                },
+                error.CcSwitchProviderNotFound => {
+                    try printHandledError(
+                        "cc-switch provider was not found.",
+                        "Check the provider id in cc-switch and try `codex-auth api-profile import-cc-switch --provider-id <id>` again.",
+                    );
+                    return err;
+                },
+                error.Sqlite3NotFound => {
+                    try printHandledError(
+                        "`sqlite3` was not found.",
+                        "Install `sqlite3` or make sure it is available in PATH before importing cc-switch profiles.",
+                    );
+                    return err;
+                },
+                error.SqliteQueryFailed => {
+                    try printHandledError(
+                        "failed to read the cc-switch database.",
+                        "Open cc-switch once to confirm the database is readable, then try the import again.",
+                    );
+                    return err;
+                },
+                else => return err,
+            };
+
+            var needs_save = summary.imported != 0 or summary.updated != 0;
+            if (try registry.syncActiveAccountFromAuth(allocator, codex_home, &reg)) {
+                needs_save = true;
+            }
+            if (needs_save) {
+                try registry.saveRegistry(allocator, codex_home, &reg);
+            }
+            if (import_opts.json) {
+                try printAccountsJson(allocator, codex_home, &reg, null, .{});
+            } else {
+                try printApiProfileImportSummary(summary);
+            }
+        },
+    }
+}
+
 fn printHandledError(message: []const u8, hint: ?[]const u8) !void {
     var buffer: [1024]u8 = undefined;
     var writer = io_util.stderrWriter(&buffer);
@@ -1706,7 +1895,10 @@ fn handleSyncHistory(allocator: std.mem.Allocator, codex_home: []const u8) !void
     var stdout: io_util.Stdout = undefined;
     stdout.init();
     const out = stdout.out();
-    try out.print("history sync complete: mirrored_threads={d}\n", .{summary.mirrored_threads});
+    try out.print(
+        "history sync complete: provider_updated_threads={d} indexed_threads={d}\n",
+        .{ summary.provider_updated_threads, summary.indexed_threads },
+    );
     try out.flush();
 }
 
