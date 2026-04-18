@@ -76,5 +76,5 @@ This document describes the repository's macOS-only CI, preview artifact publish
 - The same release workflow also builds the macOS menu bar app archives on `macos-latest` for both `x86_64-apple-macosx14.0` and `arm64-apple-macosx14.0`, then attaches the zipped `.app` bundles to the GitHub release.
 - Release notes are generated from git tags and commit history.
 - GitHub releases are published automatically from the tag pipeline.
-- Stable tags create normal GitHub releases.
-- Prerelease tags such as `v0.2.0-rc.1`, `v0.2.0-beta.1`, and `v0.2.0-alpha.1` create GitHub releases marked as prereleases, not drafts.
+- Stable tags create normal GitHub releases and are marked as the latest release automatically.
+- Prerelease tags such as `v0.2.0-rc.1`, `v0.2.0-beta.1`, and `v0.2.0-alpha.1` create GitHub releases marked as prereleases, not drafts, and they are not marked as the latest release.
