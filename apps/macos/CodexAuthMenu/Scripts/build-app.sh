@@ -17,6 +17,52 @@ ZIG_EXECUTABLE="${ZIG_EXECUTABLE:-}"
 APP_VERSION="${APP_VERSION:-}"
 APP_SHORT_VERSION="${APP_SHORT_VERSION:-}"
 APP_BUNDLE_VERSION="${APP_BUNDLE_VERSION:-}"
+TARGET_TRIPLE="${TARGET_TRIPLE:-}"
+TARGET_ARCH="${TARGET_ARCH:-}"
+CLI_ZIG_TARGET="${CLI_ZIG_TARGET:-}"
+
+normalize_arch() {
+  case "$1" in
+    arm64|aarch64)
+      echo "arm64"
+      ;;
+    x86_64|amd64)
+      echo "x86_64"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [ -z "$TARGET_ARCH" ] && [ -n "$TARGET_TRIPLE" ]; then
+  case "$TARGET_TRIPLE" in
+    arm64-*|aarch64-*)
+      TARGET_ARCH="arm64"
+      ;;
+    x86_64-*|amd64-*)
+      TARGET_ARCH="x86_64"
+      ;;
+  esac
+fi
+
+if [ -z "$TARGET_ARCH" ]; then
+  if ! TARGET_ARCH="$(normalize_arch "$(uname -m)")"; then
+    echo "Warning: unsupported macOS architecture for bundled codex-auth: $(uname -m)" >&2
+    TARGET_ARCH=""
+  fi
+fi
+
+if [ -z "$CLI_ZIG_TARGET" ] && [ -n "$TARGET_ARCH" ]; then
+  case "$TARGET_ARCH" in
+    arm64)
+      CLI_ZIG_TARGET="aarch64-macos"
+      ;;
+    x86_64)
+      CLI_ZIG_TARGET="x86_64-macos"
+      ;;
+  esac
+fi
 
 if [ -z "$ZIG_EXECUTABLE" ] && command -v zig >/dev/null 2>&1; then
   ZIG_EXECUTABLE="$(command -v zig)"
@@ -53,24 +99,17 @@ build_bundled_cli() {
   if [ -n "$ZIG_EXECUTABLE" ] && [ -x "$ZIG_EXECUTABLE" ]; then
     local sdk_root
     sdk_root="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}"
-    local machine
-    machine="$(uname -m)"
-    local zig_target
-    case "$machine" in
-      arm64) zig_target="aarch64-macos" ;;
-      x86_64) zig_target="x86_64-macos" ;;
-      *)
-        echo "Warning: unsupported macOS architecture for bundled codex-auth: $machine" >&2
-        return 1
-        ;;
-    esac
+    if [ -z "$CLI_ZIG_TARGET" ]; then
+      echo "Warning: unsupported macOS architecture for bundled codex-auth." >&2
+      return 1
+    fi
 
     local direct_build_path="$BUILD_DIR/codex-auth"
-    echo "Building bundled codex-auth CLI..."
+    echo "Building bundled codex-auth CLI for $CLI_ZIG_TARGET..."
     "$ZIG_EXECUTABLE" build-exe \
       "$REPO_ROOT/src/main.zig" \
       -lc \
-      -target "$zig_target" \
+      -target "$CLI_ZIG_TARGET" \
       --sysroot "$sdk_root" \
       -O ReleaseSafe \
       -femit-bin="$direct_build_path"
@@ -90,10 +129,18 @@ if [ ! -f "$ICON_PATH" ] || [ ! -f "$ICON_PREVIEW_PATH" ]; then
   swift "$APP_DIR/Scripts/generate-icon.swift"
 fi
 
-swift build \
-  --package-path "$APP_DIR" \
-  --scratch-path "$SCRATCH_PATH" \
+swift_build_args=(
+  build
+  --package-path "$APP_DIR"
+  --scratch-path "$SCRATCH_PATH"
   --configuration "$CONFIGURATION"
+)
+
+if [ -n "$TARGET_TRIPLE" ]; then
+  swift_build_args+=(--triple "$TARGET_TRIPLE")
+fi
+
+swift "${swift_build_args[@]}"
 
 rm -rf "$BUNDLE_PATH"
 mkdir -p "$BUNDLE_PATH/Contents/MacOS"

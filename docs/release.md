@@ -62,6 +62,7 @@ This document describes the repository's macOS-only CI, preview artifact publish
 
 - Successful `CI` runs for `push` events on `main` trigger `.github/workflows/main-snapshot-release.yml`.
 - The workflow rebuilds the macOS CLI archives and both macOS menu bar app bundles for the exact `main` commit that passed CI.
+- The menu bar app archives are built on `macos-latest` by targeting `x86_64-apple-macosx14.0` and `arm64-apple-macosx14.0`, so snapshot publishing does not depend on a separate Intel runner queue.
 - Published assets are attached to a rolling prerelease named `main-snapshot`.
 - Each new successful `main` push replaces the previous `main-snapshot` release instead of creating a new stable version tag.
 - This snapshot channel is intended for "latest successful main build" installs.
@@ -72,7 +73,7 @@ This document describes the repository's macOS-only CI, preview artifact publish
 - Tag pushes matching `v*` run `.github/workflows/release.yml`.
 - The release workflow first validates the code on `macos-latest`.
 - It then builds release assets for macOS CLI binaries on Ubuntu.
-- The same release workflow also builds the macOS menu bar app on Intel and Apple Silicon runners and attaches zipped `.app` bundles to the GitHub release.
+- The same release workflow also builds the macOS menu bar app archives on `macos-latest` for both `x86_64-apple-macosx14.0` and `arm64-apple-macosx14.0`, then attaches the zipped `.app` bundles to the GitHub release.
 - Release notes are generated from git tags and commit history.
 - GitHub releases are published automatically from the tag pipeline.
 - Stable tags create normal GitHub releases.

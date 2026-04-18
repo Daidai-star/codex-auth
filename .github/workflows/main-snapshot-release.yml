@@ -120,16 +120,20 @@ jobs:
     name: Build Snapshot Menu App (${{ matrix.id }})
     needs: prepare
     if: needs.prepare.outputs.publish == 'true'
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - id: darwin-x64-app
-            runner: macos-13
+            target_arch: x86_64
+            target_triple: x86_64-apple-macosx14.0
+            cli_zig_target: x86_64-macos
             archive_name: CodexAuthMenu-macOS-X64.zip
           - id: darwin-arm64-app
-            runner: macos-14
+            target_arch: arm64
+            target_triple: arm64-apple-macosx14.0
+            cli_zig_target: aarch64-macos
             archive_name: CodexAuthMenu-macOS-ARM64.zip
 
     steps:
@@ -150,6 +154,9 @@ jobs:
           OUTPUT_DIR="$RUNNER_TEMP/codex-auth-menu-app/${{ matrix.id }}/artifacts/${{ matrix.id }}" \
           SCRATCH_PATH="$RUNNER_TEMP/codex-auth-menu-app/${{ matrix.id }}/swift-build" \
           ARCHIVE_NAME="${{ matrix.archive_name }}" \
+          TARGET_ARCH="${{ matrix.target_arch }}" \
+          TARGET_TRIPLE="${{ matrix.target_triple }}" \
+          CLI_ZIG_TARGET="${{ matrix.cli_zig_target }}" \
           ZIG_EXECUTABLE="$(command -v zig)" \
             bash apps/macos/CodexAuthMenu/Scripts/package-release-app.sh
 
