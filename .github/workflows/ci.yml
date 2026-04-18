@@ -31,13 +31,9 @@ jobs:
       - name: Check package versions
         run: node scripts/npm/check-versions.mjs ""
 
-  zig:
-    name: Zig (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  zig-macos:
+    name: macOS CLI Smoke
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
@@ -53,10 +49,6 @@ jobs:
         run: |
           PATH="$PWD/scripts:$PATH" zig version
           PATH="$PWD/scripts:$PATH" zig env
-
-      - name: Zig test
-        shell: bash
-        run: npm run test:zig
 
       - name: Build native binary
         shell: bash

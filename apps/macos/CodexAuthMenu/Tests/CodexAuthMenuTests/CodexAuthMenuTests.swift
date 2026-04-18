@@ -257,6 +257,9 @@ final class CodexAuthMenuTests: XCTestCase {
                 XCTAssertTrue((environment["PATH"] ?? "").contains(nodeDir.path))
                 return Self.makeStateCommandResult(activeKey: "acct-primary")
             },
+            isExecutable: { path in
+                path == nodeExecutable.path
+            },
             shellResolver: { _, _ in nil }
         )
 
