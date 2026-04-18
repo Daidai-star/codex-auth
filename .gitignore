@@ -1,16 +1,9 @@
-# Zig build artifacts
-zig-out/
-.zig-cache/
-dist/
-*.tgz
+.DS_Store
 .playwright-cli/
+.zig-cache/
+zig-out/
 output/
+
+apps/macos/CodexAuthMenu/.build/
 apps/macos/CodexAuthMenu/build/
 apps/macos/CodexAuthMenu/Resources/AppIcon.iconset/
-
-# IDE/Editor
-.DS_Store
-.idea/
-
-# Local benchmarking workspace
-benchmark/
