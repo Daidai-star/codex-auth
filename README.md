@@ -56,6 +56,10 @@
 - `CodexAuthMenu-macOS-ARM64.zip`：Apple Silicon
 - `CodexAuthMenu-macOS-X64.zip`：Intel
 
+另外，`main` 分支每次 CI 成功后，`Releases` 页面还会自动刷新一个滚动预发布：
+
+- `main-snapshot`：最新一次成功构建的主分支安装包，适合想第一时间体验新版本时使用
+
 菜单栏 App bundle 已经内置 `codex-auth`，所以：
 
 - 如果你已经有 `auth.json`、账号快照或者 CPA 文件，直接下载 App 就能用

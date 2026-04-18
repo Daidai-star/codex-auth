@@ -1,6 +1,6 @@
 # Release and CI
 
-This document describes the repository's macOS-only CI, preview artifact publishing, and tag-driven release automation.
+This document describes the repository's macOS-only CI, preview artifact publishing, automatic main snapshot prereleases, and tag-driven release automation.
 
 ## Version Source of Truth
 
@@ -57,6 +57,15 @@ This document describes the repository's macOS-only CI, preview artifact publish
 - Pull request previews are built by `.github/workflows/preview-release.yml`.
 - The workflow runs on `macos-latest`, builds the native CLI for the runner architecture, packages the menu bar app, and uploads the resulting archive as a workflow artifact.
 - Preview builds do not publish npm packages.
+
+## Automatic Main Snapshot Release
+
+- Successful `CI` runs for `push` events on `main` trigger `.github/workflows/main-snapshot-release.yml`.
+- The workflow rebuilds the macOS CLI archives and both macOS menu bar app bundles for the exact `main` commit that passed CI.
+- Published assets are attached to a rolling prerelease named `main-snapshot`.
+- Each new successful `main` push replaces the previous `main-snapshot` release instead of creating a new stable version tag.
+- This snapshot channel is intended for "latest successful main build" installs.
+- Stable and prerelease versioned tags such as `v0.2.3` or `v0.2.3-alpha.1` still use the manual tag workflow below.
 
 ## Tag Release Workflow
 

@@ -1,0 +1,223 @@
+name: Main Snapshot Release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+concurrency:
+  group: main-snapshot-release
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Prepare Snapshot Metadata
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.meta.outputs.publish }}
+      head_sha: ${{ steps.meta.outputs.head_sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Check whether this commit is still the latest main commit
+        id: meta
+        shell: bash
+        run: |
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          git fetch origin main --depth=1
+          LATEST_MAIN="$(git rev-parse origin/main)"
+
+          if [ "$HEAD_SHA" != "$LATEST_MAIN" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "short_sha=${HEAD_SHA::7}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${HEAD_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Read package version
+        id: version
+        if: steps.meta.outputs.publish == 'true'
+        shell: bash
+        run: |
+          VERSION="$(python3 -c 'import json, pathlib; print(json.loads(pathlib.Path("package.json").read_text())["version"])')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  release-assets:
+    name: Build Snapshot CLI (${{ matrix.id }})
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: darwin-x64
+            zig_target: x86_64-macos-none
+            binary_name: codex-auth
+            archive_name: codex-auth-macOS-X64.tar.gz
+          - id: darwin-arm64
+            zig_target: aarch64-macos-none
+            binary_name: codex-auth
+            archive_name: codex-auth-macOS-ARM64.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.head_sha }}
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Check package versions
+        run: node scripts/npm/check-versions.mjs ""
+
+      - name: Build binary
+        run: zig build -Dtarget=${{ matrix.zig_target }} -Doptimize=ReleaseSafe
+
+      - name: Stage artifact bundle
+        shell: bash
+        run: |
+          mkdir -p "artifacts/${{ matrix.id }}/binary"
+          cp "zig-out/bin/${{ matrix.binary_name }}" "artifacts/${{ matrix.id }}/binary/${{ matrix.binary_name }}"
+          tar -czf "artifacts/${{ matrix.id }}/${{ matrix.archive_name }}" -C "artifacts/${{ matrix.id }}/binary" "${{ matrix.binary_name }}"
+
+      - name: Upload artifact bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: snapshot-${{ matrix.id }}
+          path: artifacts
+
+  menu-app-assets:
+    name: Build Snapshot Menu App (${{ matrix.id }})
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: darwin-x64-app
+            runner: macos-13
+            archive_name: CodexAuthMenu-macOS-X64.zip
+          - id: darwin-arm64-app
+            runner: macos-14
+            archive_name: CodexAuthMenu-macOS-ARM64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.head_sha }}
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Build menu app archive
+        shell: bash
+        run: |
+          BUILD_DIR="$RUNNER_TEMP/codex-auth-menu-app/${{ matrix.id }}/build" \
+          OUTPUT_DIR="$RUNNER_TEMP/codex-auth-menu-app/${{ matrix.id }}/artifacts/${{ matrix.id }}" \
+          SCRATCH_PATH="$RUNNER_TEMP/codex-auth-menu-app/${{ matrix.id }}/swift-build" \
+          ARCHIVE_NAME="${{ matrix.archive_name }}" \
+          ZIG_EXECUTABLE="$(command -v zig)" \
+            bash apps/macos/CodexAuthMenu/Scripts/package-release-app.sh
+
+      - name: Upload menu app archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: snapshot-${{ matrix.id }}
+          path: ${{ runner.temp }}/codex-auth-menu-app/${{ matrix.id }}/artifacts
+
+  publish-release:
+    name: Publish Snapshot Release
+    needs: [prepare, release-assets, menu-app-assets]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+      SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Build snapshot notes
+        shell: bash
+        run: |
+          COMMIT_SUBJECT="$(git log -1 --pretty=%s "$HEAD_SHA")"
+          COMMIT_TIME="$(git log -1 --date=iso-strict --pretty=%cd "$HEAD_SHA")"
+          {
+            echo "## Main Snapshot"
+            echo
+            echo "This prerelease is updated automatically after the \`CI\` workflow succeeds on \`main\`."
+            echo
+            echo "- Version: \`$VERSION\`"
+            echo "- Commit: \`$SHORT_SHA\`"
+            echo "- Message: $COMMIT_SUBJECT"
+            echo "- Commit Time: $COMMIT_TIME"
+            echo "- CI Run: [CI #$RUN_NUMBER]($RUN_URL)"
+            echo
+            echo "Use this channel for the newest macOS build. Tag-based releases remain the stable release path."
+          } > release-notes.md
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Recreate rolling prerelease
+        shell: bash
+        run: |
+          gh release delete main-snapshot --cleanup-tag --yes || true
+          git push origin :refs/tags/main-snapshot || true
+          mapfile -t assets < <(find release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets were produced." >&2
+            exit 1
+          fi
+          gh release create main-snapshot \
+            --target "$HEAD_SHA" \
+            --title "Main Snapshot ($SHORT_SHA)" \
+            --prerelease \
+            --latest=false \
+            --notes-file release-notes.md \
+            "${assets[@]}"

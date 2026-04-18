@@ -54,6 +54,10 @@ Download from [GitHub Releases](https://github.com/Daidai-star/codex-auth/releas
 - `CodexAuthMenu-macOS-ARM64.zip` for Apple Silicon
 - `CodexAuthMenu-macOS-X64.zip` for Intel Macs
 
+The Releases page will also keep a rolling prerelease after each successful `main` CI run:
+
+- `main-snapshot`: the newest successfully built `main` install package for people who want the latest build immediately
+
 The menu bar app bundle already includes `codex-auth`, so:
 
 - if you already have `auth.json`, account snapshots, or CPA files, the app can be used directly on its own
